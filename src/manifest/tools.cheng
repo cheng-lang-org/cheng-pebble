@@ -1,0 +1,153 @@
+module pebble_manifest_tools
+
+import "../core/types.cheng" as core_types
+import "../manifest/types.cheng" as man_types
+import "../manifest/version.cheng" as man_version
+import "../manifest/store.cheng" as man_store
+import cheng / stdlib / bootstrap / strings as strings
+import cheng / stdlib / bootstrap / std / os as os
+import cheng / stdlib / bootstrap / std / strutils as strutils
+
+type
+    IssueKind = enum
+        IssueError
+        IssueWarning
+
+type
+    ManifestCompatibilityIssue =
+        kind: IssueKind
+        message: str
+
+type
+    ManifestCompatibilityReport =
+        compatible: bool
+        detectedFormat: man_store.ManifestFormatVersion
+        targetFormat: man_store.ManifestFormatVersion
+        issues: seq[ManifestCompatibilityIssue]
+
+fn ManifestFormatName(format: man_store.ManifestFormatVersion): str =
+    if format == man_store.ManifestFormatV1:
+        return "v1"
+    return "v2"
+
+fn AddIssue(report: var ManifestCompatibilityReport, kind: IssueKind, message: str) =
+    report.compatible = report.compatible and kind == IssueWarning
+    report.issues.add(ManifestCompatibilityIssue(kind: kind, message: message))
+
+fn DetectManifestFormat(manifestPath: str): man_store.ManifestFormatVersion =
+    if not os.fileExists(manifestPath):
+        return man_store.ManifestFormatV1
+    let content = os.readFile(manifestPath)
+    let lines = strutils.split(content, '\n')
+    var i: int32 = 0
+    while i < lines.len:
+        let line = strutils.strip(lines[i])
+        if strings.len(line) == 0:
+            i = i + 1
+            continue
+        if strutils.startsWith(line, "v="):
+            let parts = strutils.split(line, '|')
+            let header = parts[0]
+            if strings.len(header) > 2:
+                let value = header[2..strings.len(header) - 1]
+                let parsed = int32(strutils.parseInt(value))
+                return man_store.ManifestFormatVersion(parsed)
+        return man_store.ManifestFormatV1
+    return man_store.ManifestFormatV1
+
+fn verifyLevels(version: man_version.Version, report: var ManifestCompatibilityReport) =
+    let entries = man_version.LevelEntries(version)
+    var i: int32 = 0
+    while i < entries.len:
+        let entry = entries[i]
+        if entry.level <= 0:
+            i = i + 1
+            continue
+        var prevLargest: core_types.Key = ""
+        var first: bool = true
+        var j: int32 = 0
+        while j < entry.files.len:
+            let meta = entry.files[j]
+            if not first:
+                if core_types.CompareBytewise(prevLargest, meta.smallest) >= 0:
+                    AddIssue(report, IssueError,
+                        "level " & strings.`$`(entry.level) &
+                        " file range overlap: " & man_types.Describe(meta))
+                    break
+            prevLargest = meta.largest
+            first = false
+            j = j + 1
+        i = i + 1
+
+fn CheckManifestCompatibility(manifestPath: str,
+                              targetFormat: man_store.ManifestFormatVersion): ManifestCompatibilityReport =
+    var report = ManifestCompatibilityReport(
+        compatible: true,
+        detectedFormat: man_store.ManifestFormatV1,
+        targetFormat: targetFormat,
+        issues: @[]
+    )
+    var records: seq[man_store.ManifestRecord] = @[]
+    let store = man_store.InitManifestStore(manifestPath)
+    records = man_store.ReadAllRecords(store)
+    report.detectedFormat = store.formatVersion
+    if records.len == 0:
+        AddIssue(report, IssueError, "manifest is empty, missing snapshot record")
+        return report
+    var current: man_version.Version = nil
+    var seenSnapshot: bool = false
+    var i: int32 = 0
+    while i < records.len:
+        let record = records[i]
+        if record.kind == man_store.RecordSnapshot:
+            current = man_version.Clone(record.version)
+            seenSnapshot = true
+        else:
+            if current == nil:
+                raise newException(man_types.ManifestError, "missing snapshot before edit replay")
+            current = man_version.ApplyEdit(current, record.edit)
+        i = i + 1
+    if not seenSnapshot:
+        raise newException(man_types.ManifestError, "manifest missing snapshot record")
+    if targetFormat == man_store.ManifestFormatV1 and report.detectedFormat != man_store.ManifestFormatV1:
+        AddIssue(report, IssueError,
+            "manifest uses " & ManifestFormatName(report.detectedFormat) &
+            ", cannot downgrade to " & ManifestFormatName(targetFormat))
+    if report.compatible and current != nil:
+        verifyLevels(current, report)
+    return report
+
+fn rewriteManifest(records: seq[man_store.ManifestRecord],
+                   outputPath: str,
+                   targetFormat: man_store.ManifestFormatVersion) =
+    let outStore = man_store.InitManifestStore(outputPath, targetFormat)
+    var wroteSnapshot: bool = false
+    var i: int32 = 0
+    while i < records.len:
+        let record = records[i]
+        if record.kind == man_store.RecordSnapshot:
+            man_store.WriteSnapshot(outStore, record.version)
+            wroteSnapshot = true
+        else:
+            if not wroteSnapshot:
+                raise newException(man_types.ManifestError, "manifest missing snapshot, cannot rewrite")
+            man_store.AppendEdit(outStore, record.edit)
+        i = i + 1
+    man_store.Sync(outStore)
+    man_store.Close(outStore)
+
+fn ConvertManifestFormat(inputPath: str, outputPath: str,
+                         targetFormat: man_store.ManifestFormatVersion): ManifestCompatibilityReport =
+    var report = CheckManifestCompatibility(inputPath, targetFormat)
+    if not report.compatible:
+        return report
+    let inputStore = man_store.InitManifestStore(inputPath)
+    let records = man_store.ReadAllRecords(inputStore)
+    rewriteManifest(records, outputPath, targetFormat)
+    return report
+
+fn UpgradeManifest(inputPath: str, outputPath: str): ManifestCompatibilityReport =
+    return ConvertManifestFormat(inputPath, outputPath, man_store.ManifestFormatV2)
+
+fn DowngradeManifest(inputPath: str, outputPath: str): ManifestCompatibilityReport =
+    return ConvertManifestFormat(inputPath, outputPath, man_store.ManifestFormatV1)

@@ -1,0 +1,62 @@
+module pebble_manifest_version_edit
+
+import "../core/types.cheng" as core_types
+import "../manifest/types.cheng" as man_types
+import cheng / stdlib / bootstrap / core / option as option
+
+type
+    AddedFile =
+        level: man_types.Level
+        metadata: man_types.FileMetadata
+
+type
+    VersionEdit =
+        logNumber: option.Option[uint64]
+        prevLogNumber: option.Option[uint64]
+        nextFileNumber: option.Option[uint64]
+        lastSeqNum: option.Option[core_types.SequenceNumber]
+        comparatorName: option.Option[str]
+        deletedFiles: seq[man_types.FileReference]
+        addedFiles: seq[AddedFile]
+
+fn InitVersionEdit(): VersionEdit =
+    return VersionEdit(
+        logNumber: option.none(uint64),
+        prevLogNumber: option.none(uint64),
+        nextFileNumber: option.none(uint64),
+        lastSeqNum: option.none(core_types.SequenceNumber),
+        comparatorName: option.none(str),
+        deletedFiles: @[],
+        addedFiles: @[]
+    )
+
+fn IsEmpty(edit: VersionEdit): bool =
+    return not option.IsSome(edit.logNumber) and
+        not option.IsSome(edit.prevLogNumber) and
+        not option.IsSome(edit.nextFileNumber) and
+        not option.IsSome(edit.lastSeqNum) and
+        not option.IsSome(edit.comparatorName) and
+        edit.deletedFiles.len == 0 and
+        edit.addedFiles.len == 0
+
+fn SetLogNumber(edit: var VersionEdit, value: uint64) =
+    edit.logNumber = option.some(value)
+
+fn SetPrevLogNumber(edit: var VersionEdit, value: uint64) =
+    edit.prevLogNumber = option.some(value)
+
+fn SetNextFileNumber(edit: var VersionEdit, value: uint64) =
+    edit.nextFileNumber = option.some(value)
+
+fn SetLastSequence(edit: var VersionEdit, seq: core_types.SequenceNumber) =
+    edit.lastSeqNum = option.some(seq)
+
+fn SetComparatorName(edit: var VersionEdit, name: str) =
+    edit.comparatorName = option.some(name)
+
+fn AddFile(edit: var VersionEdit, level: man_types.Level, metadata: man_types.FileMetadata) =
+    man_types.ValidateRange(metadata)
+    edit.addedFiles.add(AddedFile(level: level, metadata: metadata))
+
+fn DeleteFile(edit: var VersionEdit, level: man_types.Level, fileNum: man_types.FileNumber) =
+    edit.deletedFiles.add(man_types.FileReference(level: level, fileNum: fileNum))

@@ -1,0 +1,149 @@
+module pebble_config_loader
+
+import cheng / stdlib / bootstrap / strings as strings
+import cheng / stdlib / bootstrap / std / os as os
+import cheng / stdlib / bootstrap / std / strutils as strutils
+import cheng / stdlib / bootstrap / tables as tables
+
+type
+    ConfigError =
+        of CatchableError
+
+type
+    FlatConfig = tables.Table[str]
+
+fn NewFlatConfig(): FlatConfig =
+    return tables.TableInit[str](64)
+
+fn findSeparator(line: str): int32 =
+    var i: int32 = 0
+    let n: int32 = strings.len(line)
+    while i < n:
+        let ch = line[i]
+        if ch == '=' or ch == ':':
+            return i
+        i = i + 1
+    return -1
+
+fn LoadConfigFile(path: str): FlatConfig =
+    if not os.fileExists(path):
+        raise newException(ConfigError, "config file not found: " & path)
+    let content = os.readFile(path)
+    let lines = strutils.split(content, '\n')
+    var cfg = NewFlatConfig()
+    var i: int32 = 0
+    while i < lines.len:
+        let raw = strutils.strip(lines[i])
+        if strings.len(raw) == 0:
+            i = i + 1
+            continue
+        if raw[0] == '#':
+            i = i + 1
+            continue
+        let sepIdx = findSeparator(raw)
+        if sepIdx < 0:
+            i = i + 1
+            continue
+        let key = strutils.strip(raw[0..sepIdx - 1])
+        var value: str = ""
+        if sepIdx + 1 <= strings.len(raw) - 1:
+            value = strutils.strip(raw[sepIdx + 1..strings.len(raw) - 1])
+        if strings.len(key) > 0:
+            tables.TablePut[str](cfg, strutils.toLowerAscii(key), value)
+        i = i + 1
+    return cfg
+
+fn MergeConfig(base: var FlatConfig, overlay: FlatConfig) =
+    var idx: int32 = 0
+    var key: str = ""
+    var value: str = ""
+    while tables.TableNext[str](overlay, &idx, &key, &value):
+        tables.TablePut[str](base, key, value)
+
+fn RegisterDefaults(base: var FlatConfig, defaults: FlatConfig) =
+    var idx: int32 = 0
+    var key: str = ""
+    var value: str = ""
+    while tables.TableNext[str](defaults, &idx, &key, &value):
+        if not tables.TableHas[str](base, key):
+            tables.TablePut[str](base, key, value)
+
+fn envKeyForConfig(key: str, prefix: str): str =
+    var normalized = strutils.replace(key, ".", "_")
+    normalized = strutils.replace(normalized, "-", "_")
+    normalized = strutils.toUpperAscii(normalized)
+    return prefix & normalized
+
+fn ApplyEnvOverrides(base: var FlatConfig, prefix: str = "PEBBLE_") =
+    var idx: int32 = 0
+    var key: str = ""
+    var value: str = ""
+    while tables.TableNext[str](base, &idx, &key, &value):
+        let envKey = envKeyForConfig(key, prefix)
+        let envValue = os.getEnv(envKey)
+        if strings.len(envValue) > 0:
+            tables.TablePut[str](base, key, envValue)
+
+fn Get(cfg: FlatConfig, key: str, fallback: str = ""): str =
+    if tables.TableHas[str](cfg, key):
+        return tables.TableGet[str](cfg, key)
+    return fallback
+
+fn Require(cfg: FlatConfig, key: str): str =
+    if tables.TableHas[str](cfg, key):
+        return tables.TableGet[str](cfg, key)
+    raise newException(ConfigError, "missing required config key: " & key)
+
+fn ToBool(cfg: FlatConfig, key: str, fallback: bool = false): bool =
+    if not tables.TableHas[str](cfg, key):
+        return fallback
+    let value = strutils.toLowerAscii(tables.TableGet[str](cfg, key))
+    if value == "1" or value == "true" or value == "yes" or value == "on":
+        return true
+    return false
+
+fn parseFloat(value: str): float64 =
+    if strings.len(value) == 0:
+        return 0.0
+    var i: int32 = 0
+    var sign: float64 = 1.0
+    if value[0] == '-':
+        sign = -1.0
+        i = 1
+    elif value[0] == '+':
+        i = 1
+    var intPart: int64 = 0
+    var hadDigit: bool = false
+    while i < strings.len(value):
+        let ch = value[i]
+        if ch < '0' or ch > '9':
+            break
+        hadDigit = true
+        intPart = intPart * 10 + int64(ord(ch) - ord('0'))
+        i = i + 1
+    var frac: float64 = 0.0
+    var denom: float64 = 1.0
+    if i < strings.len(value) and value[i] == '.':
+        i = i + 1
+        while i < strings.len(value):
+            let ch = value[i]
+            if ch < '0' or ch > '9':
+                break
+            denom = denom * 10.0
+            frac = frac + float64(ord(ch) - ord('0')) / denom
+            i = i + 1
+    if not hadDigit and frac == 0.0:
+        return 0.0
+    return sign * (float64(intPart) + frac)
+
+fn ToInt(cfg: FlatConfig, key: str, fallback: int32 = 0): int32 =
+    if not tables.TableHas[str](cfg, key):
+        return fallback
+    let raw = tables.TableGet[str](cfg, key)
+    return int32(strutils.parseInt(raw))
+
+fn ToFloat(cfg: FlatConfig, key: str, fallback: float64 = 0.0): float64 =
+    if not tables.TableHas[str](cfg, key):
+        return fallback
+    let raw = tables.TableGet[str](cfg, key)
+    return parseFloat(raw)

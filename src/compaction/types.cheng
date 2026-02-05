@@ -1,0 +1,146 @@
+module pebble_compaction_types
+
+import "../core/types.cheng" as core_types
+import "../manifest/types.cheng" as man_types
+import cheng / stdlib / bootstrap / core / option as option
+import cheng / stdlib / bootstrap / std / times as times
+
+
+type
+    CompactionError =
+        of CatchableError
+
+type
+    CompactionPriority = enum
+        CompactionLow
+        CompactionNormal
+        CompactionHigh
+        CompactionCritical
+
+type
+    LevelInput =
+        level: man_types.Level
+        files: seq[man_types.FileMetadata]
+        bytes: int64
+
+type
+    OutputShard =
+        index: int32
+        targetBytes: int64
+        smallest: option.Option[core_types.Key]
+        largest: option.Option[core_types.Key]
+
+type
+    CompactionPlan =
+        id: uint64
+        strategy: str
+        inputs: seq[LevelInput]
+        outputLevel: man_types.Level
+        estimatedBytes: int64
+        priority: CompactionPriority
+        score: float64
+        createdAt: times.DateTime
+        outputShards: seq[OutputShard]
+
+type
+    CompactionPlannerConfig =
+        l0CompactionTrigger: int32
+        maxCompactionBytes: int64
+        minCompactionBytes: int64
+        maxOutputFileBytes: int64
+        levelSizeTargets: seq[int64]
+        grandparentOverlapSoftLimit: int64
+
+type
+    LevelScore =
+        level: man_types.Level
+        score: float64
+
+type
+    CompactionTelemetry =
+        levelScores: seq[LevelScore]
+        selectedStrategy: option.Option[str]
+        reason: option.Option[str]
+
+type
+    CompactionResult =
+        bytesRead: int64
+        bytesWritten: int64
+        readAmp: float64
+        durationMs: int32
+        outputFiles: seq[man_types.FileMetadata]
+
+type
+    CompactionMetrics =
+        totalJobs: int32
+        bytesRead: int64
+        bytesWritten: int64
+        lastWriteAmp: float64
+        maxWriteAmp: float64
+        avgWriteAmp: float64
+        readAmpSamples: seq[float64]
+
+type
+    CompactionEventKind = enum
+        CompactionStart
+        CompactionFinish
+        CompactionFailure
+
+type
+    CompactionEvent =
+        kind: CompactionEventKind
+        planId: uint64
+        timestampMs: int64
+        message: str
+        payload: str
+
+type
+    CompactionJobHandler = fn (plan: CompactionPlan): CompactionResult
+
+fn InitLevelInput(level: man_types.Level,
+                  files: seq[man_types.FileMetadata]): LevelInput =
+    var total: int64 = 0
+    var i: int32 = 0
+    while i < files.len:
+        total = total + int64(files[i].sizeBytes)
+        i = i + 1
+    return LevelInput(level: level, files: files, bytes: total)
+
+fn AggregateBytes(inputs: seq[LevelInput]): int64 =
+    var total: int64 = 0
+    var i: int32 = 0
+    while i < inputs.len:
+        total = total + inputs[i].bytes
+        i = i + 1
+    return total
+
+fn LevelTarget(cfg: CompactionPlannerConfig, level: man_types.Level): int64 =
+    if level < 0:
+        return 0
+    if level < cfg.levelSizeTargets.len:
+        return cfg.levelSizeTargets[level]
+    if cfg.levelSizeTargets.len == 0:
+        return 0
+    return cfg.levelSizeTargets[cfg.levelSizeTargets.len - 1]
+
+fn AssignPriority(score: float64): CompactionPriority =
+    if score >= 2.0:
+        return CompactionCritical
+    if score >= 1.5:
+        return CompactionHigh
+    if score >= 1.0:
+        return CompactionNormal
+    return CompactionLow
+
+fn WriteAmplification(result: CompactionResult): float64 =
+    if result.bytesRead <= 0:
+        return 0.0
+    return result.bytesWritten.float / result.bytesRead.float
+
+fn NowTimestampMs(): int64 =
+    return int64(times.epochTime() * 1000.0)
+
+fn DefaultTelemetry(): CompactionTelemetry =
+    return CompactionTelemetry(levelScores: @[],
+        selectedStrategy: option.none(str),
+        reason: option.none(str))

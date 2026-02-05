@@ -1,0 +1,54 @@
+module pebble_vfs
+
+import "./vfs/types.cheng" as vtypes
+import "./vfs/faults.cheng" as vfs_faults
+import "./vfs/posix_fs.cheng" as vfs_posix
+import "./vfs/buffered_fs.cheng" as vfs_buffered
+import "./vfs/cache_fs.cheng" as vfs_cache
+import "./vfs/prefetch_rate.cheng" as vfs_prefetch
+import "./vfs/mount_fs.cheng" as vfs_mount
+
+type
+    MountPoint = vfs_mount.MountPoint
+
+fn NewMountPoint(logicalPrefix: str, physicalPrefix: str, readOnly: bool = true): MountPoint =
+    return vfs_mount.NewMountPoint(logicalPrefix, physicalPrefix, readOnly)
+
+fn ReadOnlyMount(logicalPrefix: str, physicalPrefix: str): MountPoint =
+    return vfs_mount.ReadOnlyMount(logicalPrefix, physicalPrefix)
+
+fn ReadWriteMount(logicalPrefix: str, physicalPrefix: str): MountPoint =
+    return vfs_mount.ReadWriteMount(logicalPrefix, physicalPrefix)
+
+fn NewDefaultPebbleVfs(root: str = "",
+                       injector: vfs_faults.FaultInjector = nil,
+                       bufferSize: int32 = 64 * 1024,
+                       cacheCapacityBytes: int64 = 128 * 1024 * 1024,
+                       cacheEntries: int32 = 512,
+                       readBytesPerSec: float64 = 0.0,
+                       writeBytesPerSec: float64 = 0.0,
+                       asyncPrefetch: bool = true,
+                       maxPrefetchInFlight: int32 = 8): vtypes.FileSystem =
+    var fs: vtypes.FileSystem = vfs_posix.NewPosixFileSystem(root, injector)
+    fs = vfs_buffered.NewBufferedFileSystem(fs, bufferSize)
+    fs = vfs_cache.NewCachingFileSystem(fs, cacheCapacityBytes, cacheEntries)
+    fs = vfs_prefetch.NewRateLimitedFileSystem(fs, readBytesPerSec, writeBytesPerSec,
+        asyncPrefetch, maxPrefetchInFlight)
+    return fs
+
+fn NewMountedPebbleVfs(mounts: seq[MountPoint],
+                       root: str = "",
+                       injector: vfs_faults.FaultInjector = nil,
+                       bufferSize: int32 = 64 * 1024,
+                       cacheCapacityBytes: int64 = 128 * 1024 * 1024,
+                       cacheEntries: int32 = 512,
+                       readBytesPerSec: float64 = 0.0,
+                       writeBytesPerSec: float64 = 0.0,
+                       asyncPrefetch: bool = true,
+                       maxPrefetchInFlight: int32 = 8,
+                       passThroughUnmatched: bool = false): vtypes.FileSystem =
+    var baseFs = NewDefaultPebbleVfs(root, injector, bufferSize, cacheCapacityBytes,
+        cacheEntries, readBytesPerSec, writeBytesPerSec, asyncPrefetch, maxPrefetchInFlight)
+    if mounts.len == 0:
+        return baseFs
+    return vfs_mount.NewMountFileSystem(baseFs, mounts, passThroughUnmatched)

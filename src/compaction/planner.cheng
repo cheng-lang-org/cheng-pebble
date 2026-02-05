@@ -1,0 +1,260 @@
+module pebble_compaction_planner
+
+import "./types.cheng" as comp_types
+import "../core/types.cheng" as core_types
+import "../manifest/types.cheng" as man_types
+import "../manifest/version.cheng" as man_version
+import cheng / stdlib / bootstrap / core / option as option
+import cheng / stdlib / bootstrap / std / times as times
+
+
+type
+    PlannerContext =
+        version: man_version.Version
+        cfg: comp_types.CompactionPlannerConfig
+        comparator: core_types.Comparator
+
+type
+    CompactionPlanner = ref
+        cfg: comp_types.CompactionPlannerConfig
+        comparator: core_types.Comparator
+        nextId: uint64
+
+fn ensureComparator(comp: core_types.Comparator): core_types.Comparator =
+    if comp == nil:
+        return core_types.CompareBytewise
+    return comp
+
+fn NewCompactionPlanner(cfg: comp_types.CompactionPlannerConfig,
+                        comparator: core_types.Comparator = core_types.CompareBytewise): CompactionPlanner =
+    var planner: CompactionPlanner = new[CompactionPlanner]()
+    if planner != nil:
+        planner.cfg = cfg
+        planner.comparator = ensureComparator(comparator)
+        planner.nextId = 0
+    return planner
+
+fn sortFilesBySmallest(files: var seq[man_types.FileMetadata], comparator: core_types.Comparator) =
+    var i: int32 = 0
+    while i < files.len:
+        var j: int32 = i + 1
+        while j < files.len:
+            if comparator(files[j].smallest, files[i].smallest) < 0:
+                let tmp = files[i]
+                files[i] = files[j]
+                files[j] = tmp
+            j = j + 1
+        i = i + 1
+
+fn rangeForFiles(files: seq[man_types.FileMetadata], comparator: core_types.Comparator): tuple[smallest: core_types.Key, largest: core_types.Key] =
+    if files.len == 0:
+        return (smallest: core_types.ToKey(""), largest: core_types.ToKey(""))
+    var minKey = files[0].smallest
+    var maxKey = files[0].largest
+    var i: int32 = 0
+    while i < files.len:
+        let meta = files[i]
+        if comparator(meta.smallest, minKey) < 0:
+            minKey = meta.smallest
+        if comparator(meta.largest, maxKey) > 0:
+            maxKey = meta.largest
+        i = i + 1
+    return (smallest: minKey, largest: maxKey)
+
+fn overlapsRange(meta: man_types.FileMetadata,
+                 smallest: core_types.Key,
+                 largest: core_types.Key,
+                 comparator: core_types.Comparator): bool =
+    let cmpStart = comparator(meta.largest, smallest)
+    let cmpEnd = comparator(meta.smallest, largest)
+    return not (cmpStart < 0 or cmpEnd > 0)
+
+fn selectByBytes(files: seq[man_types.FileMetadata], maxBytes: int64): seq[man_types.FileMetadata] =
+    if files.len == 0:
+        return @[]
+    if maxBytes <= 0:
+        return files
+    var total: int64 = 0
+    var out: seq[man_types.FileMetadata] = @[]
+    var i: int32 = 0
+    while i < files.len:
+        let meta = files[i]
+        if total > 0 and total + int64(meta.sizeBytes) > maxBytes:
+            break
+        out.add(meta)
+        total = total + int64(meta.sizeBytes)
+        i = i + 1
+    if out.len == 0:
+        out.add(files[0])
+    return out
+
+fn buildOutputShards(planner: CompactionPlanner, plan: var comp_types.CompactionPlan) =
+    if planner == nil or plan.inputs.len == 0:
+        plan.outputShards = @[]
+        return
+    var files: seq[man_types.FileMetadata] = @[]
+    var i: int32 = 0
+    while i < plan.inputs.len:
+        var j: int32 = 0
+        while j < plan.inputs[i].files.len:
+            files.add(plan.inputs[i].files[j])
+            j = j + 1
+        i = i + 1
+    if files.len == 0:
+        plan.outputShards = @[]
+        return
+    sortFilesBySmallest(files, planner.comparator)
+    let limit = planner.cfg.maxOutputFileBytes
+    var shards: seq[comp_types.OutputShard] = @[]
+    var current = comp_types.OutputShard(index: 0,
+        targetBytes: 0,
+        smallest: option.none(core_types.Key),
+        largest: option.none(core_types.Key))
+    var hasCurrent: bool = false
+    var idx: int32 = 0
+    while idx < files.len:
+        let meta = files[idx]
+        if hasCurrent and limit > 0 and
+           current.targetBytes > 0 and
+           current.targetBytes + int64(meta.sizeBytes) > limit:
+            shards.add(current)
+            current = comp_types.OutputShard(index: current.index + 1,
+                targetBytes: 0,
+                smallest: option.none(core_types.Key),
+                largest: option.none(core_types.Key))
+        if not hasCurrent:
+            hasCurrent = true
+        if not option.IsSome(current.smallest) or
+           planner.comparator(meta.smallest, option.Get(current.smallest)) < 0:
+            current.smallest = option.some(meta.smallest)
+        if not option.IsSome(current.largest) or
+           planner.comparator(meta.largest, option.Get(current.largest)) > 0:
+            current.largest = option.some(meta.largest)
+        current.targetBytes = current.targetBytes + int64(meta.sizeBytes)
+        idx = idx + 1
+    if hasCurrent and current.targetBytes > 0:
+        shards.add(current)
+    plan.outputShards = shards
+
+fn finalizePlan(planner: CompactionPlanner, plan: var comp_types.CompactionPlan) =
+    planner.nextId = planner.nextId + 1
+    plan.id = planner.nextId
+    plan.createdAt = times.now()
+    plan.estimatedBytes = comp_types.AggregateBytes(plan.inputs)
+    plan.priority = comp_types.AssignPriority(plan.score)
+    buildOutputShards(planner, plan)
+
+fn buildL0Plan(ctx: PlannerContext,
+               telemetry: var comp_types.CompactionTelemetry): option.Option[comp_types.CompactionPlan] =
+    let l0 = man_version.LevelFilesAt(ctx.version, 0)
+    if l0.len == 0 or ctx.cfg.l0CompactionTrigger <= 0:
+        return option.none(comp_types.CompactionPlan)
+    let score = l0.len.float / ctx.cfg.l0CompactionTrigger.float
+    telemetry.levelScores.add(comp_types.LevelScore(level: 0, score: score))
+    if score < 1.0:
+        return option.none(comp_types.CompactionPlan)
+    let range = rangeForFiles(l0, ctx.comparator)
+    let l1 = man_version.LevelFilesAt(ctx.version, 1)
+    var overlapping: seq[man_types.FileMetadata] = @[]
+    var i: int32 = 0
+    while i < l1.len:
+        if overlapsRange(l1[i], range.smallest, range.largest, ctx.comparator):
+            overlapping.add(l1[i])
+        i = i + 1
+    var inputs: seq[comp_types.LevelInput] = @[]
+    inputs.add(comp_types.InitLevelInput(0, l0))
+    if overlapping.len > 0:
+        inputs.add(comp_types.InitLevelInput(1, overlapping))
+    var plan = comp_types.CompactionPlan(
+        strategy: "l0-flush",
+        inputs: inputs,
+        outputLevel: 1,
+        estimatedBytes: 0,
+        priority: comp_types.CompactionLow,
+        score: score,
+        createdAt: times.now(),
+        outputShards: @[]
+    )
+    telemetry.reason = option.some("L0 file count above trigger")
+    return option.some(plan)
+
+fn buildLevelPlan(ctx: PlannerContext,
+                  telemetry: var comp_types.CompactionTelemetry): option.Option[comp_types.CompactionPlan] =
+    let entries = man_version.LevelEntries(ctx.version)
+    var bestLevel: int32 = -1
+    var bestScore: float64 = 0.0
+    var i: int32 = 0
+    while i < entries.len:
+        let entry = entries[i]
+        if entry.level <= 0:
+            i = i + 1
+            continue
+        var bytes: int64 = 0
+        var j: int32 = 0
+        while j < entry.files.len:
+            bytes = bytes + int64(entry.files[j].sizeBytes)
+            j = j + 1
+        let target = comp_types.LevelTarget(ctx.cfg, entry.level)
+        if target <= 0:
+            i = i + 1
+            continue
+        let score = bytes.float / target.float
+        telemetry.levelScores.add(comp_types.LevelScore(level: entry.level, score: score))
+        if score > bestScore:
+            bestScore = score
+            bestLevel = entry.level
+        i = i + 1
+    if bestLevel < 0 or bestScore < 1.0:
+        return option.none(comp_types.CompactionPlan)
+    var files = man_version.LevelFilesAt(ctx.version, bestLevel)
+    sortFilesBySmallest(files, ctx.comparator)
+    let selected = selectByBytes(files, ctx.cfg.maxCompactionBytes)
+    if selected.len == 0:
+        return option.none(comp_types.CompactionPlan)
+    let range = rangeForFiles(selected, ctx.comparator)
+    let nextLevel = bestLevel + 1
+    let nextFiles = man_version.LevelFilesAt(ctx.version, nextLevel)
+    var overlaps: seq[man_types.FileMetadata] = @[]
+    var k: int32 = 0
+    while k < nextFiles.len:
+        if overlapsRange(nextFiles[k], range.smallest, range.largest, ctx.comparator):
+            overlaps.add(nextFiles[k])
+        k = k + 1
+    var inputs: seq[comp_types.LevelInput] = @[]
+    inputs.add(comp_types.InitLevelInput(bestLevel, selected))
+    if overlaps.len > 0:
+        inputs.add(comp_types.InitLevelInput(nextLevel, overlaps))
+    var plan = comp_types.CompactionPlan(
+        strategy: "level",
+        inputs: inputs,
+        outputLevel: nextLevel,
+        estimatedBytes: 0,
+        priority: comp_types.CompactionLow,
+        score: bestScore,
+        createdAt: times.now(),
+        outputShards: @[]
+    )
+    telemetry.reason = option.some("level size exceeds target")
+    return option.some(plan)
+
+fn NextPlan(planner: CompactionPlanner,
+            version: man_version.Version,
+            telemetry: var comp_types.CompactionTelemetry): option.Option[comp_types.CompactionPlan] =
+    if planner == nil or version == nil:
+        return option.none(comp_types.CompactionPlan)
+    let ctx = PlannerContext(version: version,
+        cfg: planner.cfg,
+        comparator: planner.comparator)
+    var planOpt = buildL0Plan(ctx, telemetry)
+    if not option.IsSome(planOpt):
+        planOpt = buildLevelPlan(ctx, telemetry)
+    if not option.IsSome(planOpt):
+        return option.none(comp_types.CompactionPlan)
+    var plan = option.Get(planOpt)
+    if planner.cfg.minCompactionBytes > 0 and plan.estimatedBytes < planner.cfg.minCompactionBytes:
+        plan.estimatedBytes = comp_types.AggregateBytes(plan.inputs)
+        if plan.estimatedBytes < planner.cfg.minCompactionBytes:
+            return option.none(comp_types.CompactionPlan)
+    finalizePlan(planner, plan)
+    telemetry.selectedStrategy = option.some(plan.strategy)
+    return option.some(plan)

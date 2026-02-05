@@ -1,0 +1,64 @@
+module pebble_vfs_faults
+
+import cheng / stdlib / bootstrap / core / option as option
+
+type
+    FaultOp = enum
+        FaultCreate
+        FaultOpen
+        FaultOpenReadWrite
+        FaultOpenDir
+        FaultLink
+        FaultRemove
+        FaultRemoveAll
+        FaultRename
+        FaultReuseForWrite
+        FaultMkdirAll
+        FaultLock
+        FaultList
+        FaultStat
+        FaultDiskUsage
+        FaultFileRead
+        FaultFileReadAt
+        FaultFileWrite
+        FaultFileWriteAt
+        FaultFilePreallocate
+        FaultFileSync
+        FaultFileSyncData
+        FaultFileSyncTo
+        FaultFilePrefetch
+        FaultFileMap
+
+type
+    FaultHook = fn (op: FaultOp, path: str): option.Option[str]
+
+type
+    FaultInjector = ref
+        hooks: seq[FaultHook]
+
+fn NewFaultInjector(): FaultInjector =
+    return FaultInjector(hooks: @[])
+
+fn AddHook(injector: FaultInjector, hook: FaultHook) =
+    if injector == nil:
+        raise newException(ValueError, "FaultInjector must not be nil")
+    injector.hooks.add(hook)
+
+fn ClearHooks(injector: FaultInjector) =
+    if injector == nil:
+        return
+    injector.hooks.setLen(0)
+
+fn ShouldFail(injector: FaultInjector, op: FaultOp, path: str) =
+    if injector == nil:
+        return
+    var i: int32 = 0
+    while i < injector.hooks.len:
+        let hook = injector.hooks[i]
+        let verdict = hook(op, path)
+        if option.IsSome(verdict):
+            raise newException(IOError, option.Get(verdict))
+        i = i + 1
+
+fn HasHooks(injector: FaultInjector): bool =
+    return injector != nil and injector.hooks.len > 0

@@ -1,0 +1,148 @@
+module pebble_tooling_cli_core
+
+import cheng / stdlib / bootstrap / tables as tables
+import cheng / stdlib / bootstrap / strings as strings
+import cheng / stdlib / bootstrap / std / strutils as strutils
+
+type
+    CliError =
+        of CatchableError
+
+type
+    CliHandler = fn (ctx: CliContext, args: seq[str])
+
+type
+    CliContext =
+        programName: str
+        commandPath: seq[str]
+
+type
+    CliCommand = ref
+        name: str
+        summary: str
+        details: str
+        handler: CliHandler
+        hasHandler: bool
+        subcommands: tables.Table[CliCommand]
+        aliases: seq[str]
+
+fn RaiseCliError(msg: str) =
+    raise newException(CliError, msg)
+
+fn NewCliCommand(name: str, summary: str, handler: CliHandler = nil, details: str = ""): CliCommand =
+    var cmd: CliCommand = new[CliCommand]()
+    if cmd != nil:
+        cmd.name = name
+        cmd.summary = summary
+        cmd.details = details
+        cmd.handler = handler
+        cmd.hasHandler = handler != nil
+        cmd.subcommands = tables.TableInit[CliCommand](32)
+        cmd.aliases = @[]
+    return cmd
+
+fn AddAlias(cmd: CliCommand, alias: str) =
+    if cmd == nil:
+        return
+    if strings.len(alias) == 0:
+        raise newException(ValueError, "alias must be non-empty")
+    if alias == cmd.name:
+        return
+    var i: int32 = 0
+    while i < cmd.aliases.len:
+        if cmd.aliases[i] == alias:
+            return
+        i = i + 1
+    cmd.aliases.add(alias)
+
+fn AddSubcommand(parent: CliCommand, child: CliCommand) =
+    if parent == nil or child == nil:
+        return
+    if tables.TableHas[CliCommand](parent.subcommands, child.name):
+        raise newException(ValueError, "duplicate command registration: " & child.name)
+    tables.TablePut[CliCommand](parent.subcommands, child.name, child)
+
+fn FindSubcommand(parent: CliCommand, name: str): CliCommand =
+    if parent == nil:
+        return nil
+    if tables.TableHas[CliCommand](parent.subcommands, name):
+        return tables.TableGet[CliCommand](parent.subcommands, name)
+    var idx: int32 = 0
+    var key: str = ""
+    var entry: CliCommand = nil
+    while tables.TableNext[CliCommand](parent.subcommands, &idx, &key, &entry):
+        var i: int32 = 0
+        while i < entry.aliases.len:
+            if entry.aliases[i] == name:
+                return entry
+            i = i + 1
+    return nil
+
+fn renderPath(ctx: CliContext, cmd: CliCommand): str =
+    var parts: seq[str] = @[]
+    if strings.len(ctx.programName) > 0:
+        parts.add(ctx.programName)
+    var i: int32 = 0
+    while i < ctx.commandPath.len:
+        parts.add(ctx.commandPath[i])
+        i = i + 1
+    if cmd != nil and strings.len(cmd.name) > 0:
+        parts.add(cmd.name)
+    return strutils.join(parts, " ")
+
+fn RenderUsage(cmd: CliCommand, ctx: CliContext) =
+    if cmd == nil:
+        return
+    let path = renderPath(ctx, cmd)
+    echo("Usage:")
+    if cmd.hasHandler or cmd.subcommands.len == 0:
+        echo("  " & path & " [flags]")
+    if cmd.subcommands.len > 0:
+        echo("  " & path & " <subcommand> [flags]")
+        echo("")
+        echo("Subcommands:")
+        var idx: int32 = 0
+        var key: str = ""
+        var entry: CliCommand = nil
+        while tables.TableNext[CliCommand](cmd.subcommands, &idx, &key, &entry):
+            var aliasStr = ""
+            if entry.aliases.len > 0:
+                aliasStr = " (aliases: " & strutils.join(entry.aliases, ", ") & ")"
+            echo("  " & entry.name & aliasStr)
+            if strings.len(entry.summary) > 0:
+                echo("    " & entry.summary)
+        if strings.len(cmd.details) > 0:
+            echo("")
+            echo(cmd.details)
+
+fn Dispatch(cmd: CliCommand,
+            args: seq[str],
+            ctx: CliContext = CliContext(programName: "pebble_cli", commandPath: @[])) =
+    if cmd == nil:
+        return
+    if args.len == 0:
+        if cmd.hasHandler:
+            cmd.handler(ctx, @[])
+        else:
+            RenderUsage(cmd, ctx)
+        return
+    let first = args[0]
+    if first == "-h" or first == "--help" or first == "help":
+        RenderUsage(cmd, ctx)
+        return
+    let sub = FindSubcommand(cmd, first)
+    if sub != nil:
+        var nextCtx = ctx
+        nextCtx.commandPath = ctx.commandPath
+        nextCtx.commandPath.add(cmd.name)
+        var tail: seq[str] = @[]
+        var i: int32 = 1
+        while i < args.len:
+            tail.add(args[i])
+            i = i + 1
+        Dispatch(sub, tail, nextCtx)
+        return
+    if cmd.hasHandler:
+        cmd.handler(ctx, args)
+    else:
+        RaiseCliError("unknown command: " & first)

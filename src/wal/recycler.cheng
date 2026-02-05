@@ -1,0 +1,47 @@
+module pebble_wal_recycler
+
+import cheng / stdlib / bootstrap / core / option as option
+
+type
+    RecyclableFile =
+        path: str
+        size: int64
+
+type
+    LogRecycler = ref
+        maxPool: int32
+        pool: seq[RecyclableFile]
+
+fn InitLogRecycler(maxPool: int32 = 8): LogRecycler =
+    var recycler: LogRecycler = new[LogRecycler]()
+    if recycler != nil:
+        recycler.maxPool = max(0, maxPool)
+        recycler.pool = @[]
+    return recycler
+
+fn Len(recycler: LogRecycler): int32 =
+    if recycler == nil:
+        return 0
+    return recycler.pool.len
+
+fn Acquire(recycler: LogRecycler): option.Option[RecyclableFile] =
+    if recycler == nil or recycler.maxPool == 0:
+        return option.none(RecyclableFile)
+    if recycler.pool.len == 0:
+        return option.none(RecyclableFile)
+    let last = recycler.pool.len - 1
+    let file = recycler.pool[last]
+    recycler.pool.setLen(last)
+    return option.some(file)
+
+fn Recycle(recycler: LogRecycler, file: RecyclableFile) =
+    if recycler == nil or recycler.maxPool == 0:
+        return
+    if recycler.pool.len >= recycler.maxPool:
+        recycler.pool.delete(0)
+    recycler.pool.add(file)
+
+fn Clear(recycler: LogRecycler) =
+    if recycler == nil:
+        return
+    recycler.pool.setLen(0)

@@ -1,0 +1,49 @@
+module pebble_runtime_executor
+
+type
+    ExecutorMode = enum
+        execSynchronous
+
+type
+    TaskProc = fn ()
+
+type
+    TaskHandle = ref
+        completed: bool
+
+type
+    Executor = ref
+        name: str
+        mode: ExecutorMode
+
+fn initTaskHandle(): TaskHandle =
+    var handle: TaskHandle = new[TaskHandle]()
+    if handle != nil:
+        handle.completed = false
+    return handle
+
+fn InitExecutor(name: str = "default",
+                mode: ExecutorMode = execSynchronous): Executor =
+    var exec: Executor = new[Executor]()
+    if exec != nil:
+        exec.name = name
+        exec.mode = mode
+    return exec
+
+fn Submit(exec: Executor, task: TaskProc): TaskHandle =
+    let handle = initTaskHandle()
+    if task != nil:
+        task()
+    if handle != nil:
+        handle.completed = true
+    return handle
+
+fn Wait(handle: TaskHandle) =
+    if handle == nil:
+        return
+    handle.completed = true
+
+fn IsPending(handle: TaskHandle): bool =
+    if handle == nil:
+        return false
+    return not handle.completed

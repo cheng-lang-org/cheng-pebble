@@ -1,0 +1,72 @@
+module pebble_core_types
+
+import cheng / stdlib / bootstrap / core / option as option
+import cheng / stdlib / bootstrap / tables as tables
+
+const
+    UnknownComparator = ""
+
+type
+    KeyKind = enum
+        KeyKindUnknown
+        KeyKindValue
+        KeyKindDeletion
+        KeyKindRangeDeletion
+        KeyKindRangeKeySet
+        KeyKindRangeKeyUnset
+        KeyKindRangeKeyDelete
+
+    Key = str
+    SequenceNumber = uint64
+    Comparator = fn (a: Key, b: Key): int32
+
+    ComparatorRegistry = ref
+        defaultComp: Comparator
+        registry: tables.Table[Comparator]
+
+fn ToKey(bytes: str): Key =
+    return bytes
+
+fn ToBytes(key: Key): str =
+    return key
+
+fn ToSequence(value: uint64): SequenceNumber =
+    return value
+
+fn ToUint64(seq: SequenceNumber): uint64 =
+    return seq
+
+fn CompareBytewise(a: Key, b: Key): int32 =
+    if a == b:
+        return 0
+    if a < b:
+        return -1
+    return 1
+
+fn NewComparatorRegistry(defaultComp: Comparator = CompareBytewise): ComparatorRegistry =
+    var registry: ComparatorRegistry = new[ComparatorRegistry]()
+    if registry != nil:
+        registry.defaultComp = defaultComp
+        registry.registry = tables.TableInit[Comparator](16)
+    return registry
+
+fn RegisterComparator(registry: ComparatorRegistry, name: str, comp: Comparator) =
+    if registry == nil:
+        return
+    tables.TablePut[Comparator](registry.registry, name, comp)
+
+fn GetComparator(registry: ComparatorRegistry, name: str): option.Option[Comparator] =
+    if registry == nil:
+        return option.none(Comparator)
+    if tables.TableHas[Comparator](registry.registry, name):
+        return option.some(tables.TableGet[Comparator](registry.registry, name))
+    return option.none(Comparator)
+
+fn ResolveComparator(registry: ComparatorRegistry, name: str = UnknownComparator): Comparator =
+    if registry == nil:
+        return CompareBytewise
+    if name == "":
+        return registry.defaultComp
+    if tables.TableHas[Comparator](registry.registry, name):
+        return tables.TableGet[Comparator](registry.registry, name)
+    raise newException(ValueError, "unknown comparator: " & name)

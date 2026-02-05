@@ -1,0 +1,69 @@
+module pebble_sstable_encoding
+
+import "../sstable/types.cheng" as sstable_types
+import cheng / stdlib / bootstrap / system as sys
+import cheng / stdlib / bootstrap / strings as strings
+
+fn AppendStrBytes(buffer: var seq[uint8], text: str) =
+    let n: int32 = strings.len(text)
+    var i: int32 = 0
+    while i < n:
+        let ch = strings.charAt(text, i)
+        buffer.add(uint8(sys.ord(ch)))
+        i = i + 1
+
+fn BytesToStr(data: seq[uint8], start: int32, length: int32): str =
+    if length <= 0:
+        return ""
+    if start < 0 or start + length > data.len:
+        raise newException(sstable_types.SSTError, "bytes slice out of range")
+    var out: str = ""
+    var i: int32 = 0
+    while i < length:
+        out = out + strings.charToStr(sys.chr(int32(data[start + i])))
+        i = i + 1
+    return out
+
+fn EncodeVarint(value: uint64): seq[uint8] =
+    var v: uint64 = value
+    var buffer: seq[uint8] = @[]
+    while v >= uint64(0x80):
+        buffer.add(uint8((v & uint64(0x7f)) | uint64(0x80)))
+        v = v shr 7
+    buffer.add(uint8(v))
+    return buffer
+
+fn AppendVarint(buffer: var seq[uint8], value: uint64) =
+    var v: uint64 = value
+    while v >= uint64(0x80):
+        buffer.add(uint8((v & uint64(0x7f)) | uint64(0x80)))
+        v = v shr 7
+    buffer.add(uint8(v))
+
+fn DecodeVarint(data: seq[uint8], pos: int32*): uint64 =
+    var shift: int32 = 0
+    var result: uint64 = 0
+    while true:
+        if *pos >= data.len:
+            raise newException(sstable_types.SSTError, "varint truncated")
+        let byte = data[*pos]
+        *pos = *pos + 1
+        result = result | (uint64(byte & uint8(0x7f)) shl shift)
+        if (byte & uint8(0x80)) == uint8(0):
+            break
+        shift = shift + 7
+        if shift > 63:
+            raise newException(sstable_types.SSTError, "varint overflow")
+    return result
+
+fn AppendBytes(buffer: var seq[uint8], payload: str) =
+    AppendVarint(buffer, uint64(strings.len(payload)))
+    AppendStrBytes(buffer, payload)
+
+fn ReadBytes(data: seq[uint8], pos: int32*): str =
+    let length = int32(DecodeVarint(data, pos))
+    if *pos + length > data.len:
+        raise newException(sstable_types.SSTError, "payload truncated")
+    let out = BytesToStr(data, *pos, length)
+    *pos = *pos + length
+    return out

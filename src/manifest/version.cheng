@@ -1,0 +1,234 @@
+module pebble_manifest_version
+
+import "../core/types.cheng" as core_types
+import "../manifest/types.cheng" as man_types
+import "../manifest/version_edit.cheng" as man_edit
+import cheng / stdlib / bootstrap / core / option as option
+import cheng / stdlib / bootstrap / strings as strings
+
+type
+    LevelFiles = seq[man_types.FileMetadata]
+
+type
+    LevelEntry =
+        level: man_types.Level
+        files: LevelFiles
+
+type
+    Version = ref
+        id: man_types.VersionId
+        logNumber: uint64
+        prevLogNumber: uint64
+        nextFileNumber: uint64
+        lastSeqNum: core_types.SequenceNumber
+        comparatorName: str
+        levels: seq[LevelEntry]
+
+fn cloneFileList(files: LevelFiles): LevelFiles =
+    if files.len == 0:
+        return @[]
+    var out = newSeq[man_types.FileMetadata](files.len)
+    var i: int32 = 0
+    while i < files.len:
+        out[i] = files[i]
+        i = i + 1
+    return out
+
+fn findLevelIndex(levels: seq[LevelEntry], level: man_types.Level): int32 =
+    var i: int32 = 0
+    while i < levels.len:
+        if levels[i].level == level:
+            return i
+        i = i + 1
+    return -1
+
+fn removeLevelAt(levels: var seq[LevelEntry], idx: int32) =
+    if idx < 0 or idx >= levels.len:
+        return
+    let last: int32 = levels.len - 1
+    var i: int32 = idx
+    while i < last:
+        levels[i] = levels[i + 1]
+        i = i + 1
+    levels.setLen(last)
+
+fn sortLevels(levels: var seq[LevelEntry]) =
+    if levels.len <= 1:
+        return
+    var i: int32 = 0
+    while i < levels.len:
+        var j: int32 = i + 1
+        while j < levels.len:
+            if levels[j].level < levels[i].level:
+                let tmp = levels[i]
+                levels[i] = levels[j]
+                levels[j] = tmp
+            j = j + 1
+        i = i + 1
+
+fn sortFilesBySmallest(files: var LevelFiles) =
+    if files.len <= 1:
+        return
+    var i: int32 = 0
+    while i < files.len:
+        var j: int32 = i + 1
+        while j < files.len:
+            if core_types.CompareBytewise(files[j].smallest, files[i].smallest) < 0:
+                let tmp = files[i]
+                files[i] = files[j]
+                files[j] = tmp
+            j = j + 1
+        i = i + 1
+
+fn InitVersion(comparatorName: str = "bytewise"): Version =
+    var version: Version = new[Version]()
+    if version != nil:
+        version.id = man_types.ToVersionId(0)
+        version.logNumber = 0
+        version.prevLogNumber = 0
+        version.nextFileNumber = 1
+        version.lastSeqNum = core_types.ToSequence(0)
+        version.comparatorName = comparatorName
+        version.levels = @[]
+    return version
+
+fn Clone(version: Version): Version =
+    if version == nil:
+        return nil
+    var copy: Version = new[Version]()
+    if copy != nil:
+        copy.id = version.id
+        copy.logNumber = version.logNumber
+        copy.prevLogNumber = version.prevLogNumber
+        copy.nextFileNumber = version.nextFileNumber
+        copy.lastSeqNum = version.lastSeqNum
+        copy.comparatorName = version.comparatorName
+        copy.levels = @[]
+        var i: int32 = 0
+        while i < version.levels.len:
+            let entry = version.levels[i]
+            copy.levels.add(LevelEntry(level: entry.level, files: cloneFileList(entry.files)))
+            i = i + 1
+    return copy
+
+fn assignLevel(version: Version, level: man_types.Level, files: LevelFiles) =
+    if version == nil:
+        return
+    let idx = findLevelIndex(version.levels, level)
+    if files.len == 0:
+        if idx >= 0:
+            removeLevelAt(version.levels, idx)
+    else:
+        if idx >= 0:
+            version.levels[idx] = LevelEntry(level: level, files: files)
+        else:
+            version.levels.add(LevelEntry(level: level, files: files))
+            sortLevels(version.levels)
+
+fn LevelFilesAt(version: Version, level: man_types.Level): LevelFiles =
+    if version == nil:
+        return @[]
+    let idx = findLevelIndex(version.levels, level)
+    if idx < 0:
+        return @[]
+    return cloneFileList(version.levels[idx].files)
+
+fn Levels(version: Version): seq[man_types.Level] =
+    if version == nil:
+        return @[]
+    var out: seq[man_types.Level] = @[]
+    var i: int32 = 0
+    while i < version.levels.len:
+        out.add(version.levels[i].level)
+        i = i + 1
+    return out
+
+fn touchNextFileNumber(version: Version, meta: man_types.FileMetadata) =
+    let fileValue = man_types.FileNumberToUint64(meta.fileNum)
+    if fileValue + uint64(1) > version.nextFileNumber:
+        version.nextFileNumber = fileValue + uint64(1)
+
+fn touchSequence(version: Version, meta: man_types.FileMetadata) =
+    let largestSeq = core_types.ToUint64(meta.largestSeq)
+    if largestSeq > core_types.ToUint64(version.lastSeqNum):
+        version.lastSeqNum = core_types.ToSequence(largestSeq)
+
+fn insertFile(version: Version, level: man_types.Level, metadata: man_types.FileMetadata) =
+    var files = LevelFilesAt(version, level)
+    let allowOverlap = level == 0
+    if not allowOverlap:
+        var i: int32 = 0
+        while i < files.len:
+            if man_types.Overlaps(files[i], metadata):
+                raise newException(man_types.ManifestError,
+                    "level " & strings.`$`(level) & " file range overlap: " &
+                    man_types.Describe(files[i]) & " vs " & man_types.Describe(metadata))
+            i = i + 1
+    files.add(metadata)
+    if files.len > 1:
+        sortFilesBySmallest(files)
+    assignLevel(version, level, files)
+    touchNextFileNumber(version, metadata)
+    touchSequence(version, metadata)
+
+fn removeFile(version: Version, level: man_types.Level, fileNum: man_types.FileNumber) =
+    var files = LevelFilesAt(version, level)
+    if files.len == 0:
+        return
+    var out: LevelFiles = @[]
+    var i: int32 = 0
+    while i < files.len:
+        if not man_types.FileNumberEq(files[i].fileNum, fileNum):
+            out.add(files[i])
+        i = i + 1
+    assignLevel(version, level, out)
+
+fn ApplyEdit(base: Version, edit: man_edit.VersionEdit): Version =
+    if base == nil:
+        raise newException(man_types.ManifestError, "cannot apply version edit to nil")
+    var next = Clone(base)
+    if option.IsSome(edit.comparatorName):
+        let name = option.Get(edit.comparatorName)
+        if strings.len(next.comparatorName) > 0 and next.comparatorName != name:
+            raise newException(man_types.ManifestError, "comparator mismatch")
+        next.comparatorName = name
+    if option.IsSome(edit.logNumber):
+        next.logNumber = option.Get(edit.logNumber)
+    if option.IsSome(edit.prevLogNumber):
+        next.prevLogNumber = option.Get(edit.prevLogNumber)
+    if option.IsSome(edit.nextFileNumber):
+        next.nextFileNumber = option.Get(edit.nextFileNumber)
+    if option.IsSome(edit.lastSeqNum):
+        next.lastSeqNum = option.Get(edit.lastSeqNum)
+    var i: int32 = 0
+    while i < edit.deletedFiles.len:
+        let delRef = edit.deletedFiles[i]
+        removeFile(next, delRef.level, delRef.fileNum)
+        i = i + 1
+    var j: int32 = 0
+    while j < edit.addedFiles.len:
+        let entry = edit.addedFiles[j]
+        insertFile(next, entry.level, entry.metadata)
+        j = j + 1
+    return next
+
+fn TotalFiles(version: Version): int32 =
+    if version == nil:
+        return 0
+    var total: int32 = 0
+    var i: int32 = 0
+    while i < version.levels.len:
+        total = total + version.levels[i].files.len
+        i = i + 1
+    return total
+
+fn LevelEntries(version: Version): seq[LevelEntry] =
+    if version == nil:
+        return @[]
+    var out: seq[LevelEntry] = @[]
+    var i: int32 = 0
+    while i < version.levels.len:
+        let entry = version.levels[i]
+        out.add(LevelEntry(level: entry.level, files: cloneFileList(entry.files)))
+        i = i + 1
+    return out

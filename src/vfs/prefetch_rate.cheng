@@ -1,0 +1,247 @@
+module pebble_vfs_prefetch_rate
+
+import "../vfs/types.cheng" as vtypes
+import cheng / stdlib / bootstrap / std / monotimes as monotimes
+
+@importc("usleep")
+fn c_usleep(usec: uint32): int32
+
+type
+    RateLimiter = ref
+        capacity: float64
+        tokens: float64
+        refillPerNs: float64
+        lastRefill: monotimes.MonoTime
+
+type
+    PrefetchExecutor = ref
+        enabled: bool
+        maxInFlight: int32
+
+type
+    RateLimitedFileState = ref
+        inner: vtypes.File
+        readLimiter: RateLimiter
+        writeLimiter: RateLimiter
+        prefetcher: PrefetchExecutor
+        asyncPrefetch: bool
+        path: str
+
+type
+    RateLimitedFileSystemState = ref
+        base: vtypes.FileSystem
+        readLimiter: RateLimiter
+        writeLimiter: RateLimiter
+        prefetcher: PrefetchExecutor
+        asyncPrefetch: bool
+
+fn NewRateLimiter(bytesPerSecond: float64, burst: float64 = 0.0): RateLimiter =
+    if bytesPerSecond <= 0.0:
+        return nil
+    let burstSize = if burst <= 0.0: bytesPerSecond else: burst
+    return RateLimiter(
+        capacity: burstSize,
+        tokens: burstSize,
+        refillPerNs: bytesPerSecond / 1000000000.0,
+        lastRefill: monotimes.getMonoTime()
+    )
+
+fn refill(limiter: RateLimiter) =
+    if limiter == nil:
+        return
+    let now = monotimes.getMonoTime()
+    let delta = now - limiter.lastRefill
+    let nanos = float64(delta.ns)
+    if nanos <= 0.0:
+        return
+    let added = nanos * limiter.refillPerNs
+    let next = limiter.tokens + added
+    limiter.tokens = if next > limiter.capacity: limiter.capacity else: next
+    limiter.lastRefill = now
+
+fn sleepForNs(nanos: int64) =
+    if nanos <= 0:
+        return
+    var usec = nanos div 1000
+    if usec <= 0:
+        usec = 1
+    while usec > 0:
+        let step = if usec > 1000000: uint32(1000000) else: uint32(usec)
+        discard c_usleep(step)
+        usec = usec - int64(step)
+
+fn Acquire(limiter: RateLimiter, amount: int32) =
+    if limiter == nil or amount <= 0:
+        return
+    refill(limiter)
+    let need = float64(amount)
+    if limiter.tokens >= need:
+        limiter.tokens = limiter.tokens - need
+        return
+    if limiter.refillPerNs <= 0.0:
+        limiter.tokens = 0.0
+        return
+    let missing = need - limiter.tokens
+    let waitNs = int64(missing / limiter.refillPerNs)
+    sleepForNs(waitNs)
+    refill(limiter)
+    if limiter.tokens >= need:
+        limiter.tokens = limiter.tokens - need
+    else:
+        limiter.tokens = 0.0
+
+fn NewPrefetchExecutor(maxInFlight: int32 = 8, enabled: bool = true): PrefetchExecutor =
+    if not enabled:
+        return PrefetchExecutor(enabled: false, maxInFlight: 0)
+    let limit = if maxInFlight <= 0: 2147483647 else: maxInFlight
+    return PrefetchExecutor(enabled: true, maxInFlight: limit)
+
+fn schedule(executor: PrefetchExecutor, job: fn ()) =
+    if executor == nil or not executor.enabled:
+        job()
+        return
+    job()
+
+fn wrap(state: RateLimitedFileSystemState, file: vtypes.File, path: str): vtypes.File =
+    if file == nil:
+        return nil
+    if state.readLimiter == nil and state.writeLimiter == nil and
+        (state.prefetcher == nil or not state.asyncPrefetch):
+        return file
+    let st = RateLimitedFileState(
+        inner: file,
+        readLimiter: state.readLimiter,
+        writeLimiter: state.writeLimiter,
+        prefetcher: state.prefetcher,
+        asyncPrefetch: state.asyncPrefetch,
+        path: path
+    )
+    var out: vtypes.File = new[vtypes.File]()
+    out.closeFn = fn (self: vtypes.File) =
+        discard self
+        if st.inner != nil:
+            vtypes.Close(st.inner)
+            st.inner = nil
+    out.readFn = fn (self: vtypes.File, dest: void*, size: int32): int32 =
+        discard self
+        Acquire(st.readLimiter, size)
+        return vtypes.Read(st.inner, dest, size)
+    out.readAtFn = fn (self: vtypes.File, dest: void*, size: int32, offset: int64): int32 =
+        discard self
+        Acquire(st.readLimiter, size)
+        return vtypes.ReadAt(st.inner, dest, size, offset)
+    out.writeFn = fn (self: vtypes.File, src: void*, size: int32): int32 =
+        discard self
+        Acquire(st.writeLimiter, size)
+        return vtypes.Write(st.inner, src, size)
+    out.writeAtFn = fn (self: vtypes.File, src: void*, size: int32, offset: int64): int32 =
+        discard self
+        Acquire(st.writeLimiter, size)
+        return vtypes.WriteAt(st.inner, src, size, offset)
+    out.preallocateFn = fn (self: vtypes.File, offset: int64, length: int64) =
+        discard self
+        vtypes.Preallocate(st.inner, offset, length)
+    out.statFn = fn (self: vtypes.File): vtypes.FileInfo =
+        discard self
+        return vtypes.Stat(st.inner)
+    out.syncFn = fn (self: vtypes.File) =
+        discard self
+        vtypes.Sync(st.inner)
+    out.syncDataFn = fn (self: vtypes.File) =
+        discard self
+        vtypes.SyncData(st.inner)
+    out.syncToFn = fn (self: vtypes.File, length: int64): bool =
+        discard self
+        return vtypes.SyncTo(st.inner, length)
+    out.prefetchFn = fn (self: vtypes.File, offset: int64, length: int64) =
+        discard self
+        if length <= 0:
+            return
+        let limiter = st.readLimiter
+        let innerFile = st.inner
+        let reqLen = length
+        schedule(st.prefetcher, fn () =
+            Acquire(limiter, int32(reqLen))
+            vtypes.Prefetch(innerFile, offset, reqLen)
+        )
+    out.fdFn = fn (self: vtypes.File): uint64 =
+        discard self
+        return vtypes.Fd(st.inner)
+    out.mapFn = fn (self: vtypes.File, offset: int64, length: int32,
+                    access: vtypes.MmapAccess): vtypes.MmapRegion =
+        discard self
+        return vtypes.Map(st.inner, offset, length, access)
+    return out
+
+fn NewRateLimitedFileSystem(base: vtypes.FileSystem, readBytesPerSec: float64 = 0.0,
+                            writeBytesPerSec: float64 = 0.0, asyncPrefetch: bool = true,
+                            maxPrefetchInFlight: int32 = 8): vtypes.FileSystem =
+    if base == nil:
+        raise newException(ValueError, "base FileSystem must not be nil")
+    let state = RateLimitedFileSystemState(
+        base: base,
+        readLimiter: NewRateLimiter(readBytesPerSec),
+        writeLimiter: NewRateLimiter(writeBytesPerSec),
+        prefetcher: NewPrefetchExecutor(maxPrefetchInFlight, asyncPrefetch),
+        asyncPrefetch: asyncPrefetch
+    )
+    var fs: vtypes.FileSystem = new[vtypes.FileSystem]()
+    fs.createFn = fn (self: vtypes.FileSystem, path: str,
+                      category: vtypes.DiskWriteCategory): vtypes.File =
+        discard self
+        return wrap(state, vtypes.Create(state.base, path, category), path)
+    fs.linkFn = fn (self: vtypes.FileSystem, oldname: str, newname: str) =
+        discard self
+        vtypes.Link(state.base, oldname, newname)
+    fs.openFn = fn (self: vtypes.FileSystem, path: str, opts: seq[vtypes.OpenOption]): vtypes.File =
+        discard self
+        return wrap(state, vtypes.Open(state.base, path, opts), path)
+    fs.openReadWriteFn = fn (self: vtypes.FileSystem, path: str,
+                             category: vtypes.DiskWriteCategory,
+                             opts: seq[vtypes.OpenOption]): vtypes.File =
+        discard self
+        return wrap(state, vtypes.OpenReadWrite(state.base, path, category, opts), path)
+    fs.openDirFn = fn (self: vtypes.FileSystem, path: str): vtypes.File =
+        discard self
+        return vtypes.OpenDir(state.base, path)
+    fs.removeFn = fn (self: vtypes.FileSystem, path: str) =
+        discard self
+        vtypes.Remove(state.base, path)
+    fs.removeAllFn = fn (self: vtypes.FileSystem, path: str) =
+        discard self
+        vtypes.RemoveAll(state.base, path)
+    fs.renameFn = fn (self: vtypes.FileSystem, oldname: str, newname: str) =
+        discard self
+        vtypes.Rename(state.base, oldname, newname)
+    fs.reuseForWriteFn = fn (self: vtypes.FileSystem, oldname: str, newname: str,
+                             category: vtypes.DiskWriteCategory): vtypes.File =
+        discard self
+        return wrap(state, vtypes.ReuseForWrite(state.base, oldname, newname, category), newname)
+    fs.mkdirAllFn = fn (self: vtypes.FileSystem, path: str, perm: uint32) =
+        discard self
+        vtypes.MkdirAll(state.base, path, perm)
+    fs.lockFn = fn (self: vtypes.FileSystem, path: str): vtypes.File =
+        discard self
+        return vtypes.Lock(state.base, path)
+    fs.listFn = fn (self: vtypes.FileSystem, path: str): seq[str] =
+        discard self
+        return vtypes.List(state.base, path)
+    fs.statFn = fn (self: vtypes.FileSystem, path: str): vtypes.FileInfo =
+        discard self
+        return vtypes.StatPath(state.base, path)
+    fs.pathBaseFn = fn (self: vtypes.FileSystem, path: str): str =
+        discard self
+        return vtypes.PathBase(state.base, path)
+    fs.pathJoinFn = fn (self: vtypes.FileSystem, parts: seq[str]): str =
+        discard self
+        return vtypes.PathJoin(state.base, parts)
+    fs.pathDirFn = fn (self: vtypes.FileSystem, path: str): str =
+        discard self
+        return vtypes.PathDir(state.base, path)
+    fs.diskUsageFn = fn (self: vtypes.FileSystem, path: str): vtypes.DiskUsage =
+        discard self
+        return vtypes.DiskUsage(state.base, path)
+    fs.unwrapFn = fn (self: vtypes.FileSystem): vtypes.FileSystem =
+        discard self
+        return state.base
+    return fs

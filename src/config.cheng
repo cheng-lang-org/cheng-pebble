@@ -1,0 +1,60 @@
+module pebble_config
+
+import "./config/loader.cheng" as config_loader
+import "./config/container.cheng" as config_container
+
+type
+    FlatConfig = config_loader.FlatConfig
+    ConfigError = config_loader.ConfigError
+    ServiceBase = config_container.ServiceBase
+    ServiceLifecycle = config_container.ServiceLifecycle
+    ServiceFactory = config_container.ServiceFactory
+    ServiceRegistration = config_container.ServiceRegistration
+    ServiceContainer = config_container.ServiceContainer
+
+fn NewFlatConfig(): FlatConfig =
+    return config_loader.NewFlatConfig()
+
+fn LoadConfigFile(path: str): FlatConfig =
+    return config_loader.LoadConfigFile(path)
+
+fn MergeConfig(base: var FlatConfig, overlay: FlatConfig) =
+    config_loader.MergeConfig(base, overlay)
+
+fn RegisterDefaults(base: var FlatConfig, defaults: FlatConfig) =
+    config_loader.RegisterDefaults(base, defaults)
+
+fn ApplyEnvOverrides(base: var FlatConfig, prefix: str = "PEBBLE_") =
+    config_loader.ApplyEnvOverrides(base, prefix)
+
+fn Get(cfg: FlatConfig, key: str, fallback: str = ""): str =
+    return config_loader.Get(cfg, key, fallback)
+
+fn Require(cfg: FlatConfig, key: str): str =
+    return config_loader.Require(cfg, key)
+
+fn ToBool(cfg: FlatConfig, key: str, fallback: bool = false): bool =
+    return config_loader.ToBool(cfg, key, fallback)
+
+fn ToInt(cfg: FlatConfig, key: str, fallback: int32 = 0): int32 =
+    return config_loader.ToInt(cfg, key, fallback)
+
+fn ToFloat(cfg: FlatConfig, key: str, fallback: float64 = 0.0): float64 =
+    return config_loader.ToFloat(cfg, key, fallback)
+
+fn NewServiceContainer(): ServiceContainer =
+    return config_container.NewServiceContainer()
+
+fn Register(c: ServiceContainer, name: str,
+            factory: ServiceFactory,
+            lifecycle: ServiceLifecycle = config_container.ServiceSingleton) =
+    config_container.Register(c, name, factory, lifecycle)
+
+fn HasService(c: ServiceContainer, name: str): bool =
+    return config_container.HasService(c, name)
+
+fn Resolve(c: ServiceContainer, name: str): ServiceBase =
+    return config_container.Resolve(c, name)
+
+fn ClearCache(c: ServiceContainer) =
+    config_container.ClearCache(c)

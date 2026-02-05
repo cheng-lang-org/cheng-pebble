@@ -1,0 +1,104 @@
+module pebble_read
+
+import "./read/types.cheng" as read_types
+import "./read/iterators.cheng" as read_iterators
+import "./read/trace.cheng" as read_trace
+import "./core/types.cheng" as core_types
+import cheng / stdlib / bootstrap / core / option as option
+
+
+type
+    ReadError = read_types.ReadError
+    ReadSourceKind = read_types.ReadSourceKind
+    ReadSourceEntry = read_types.ReadSourceEntry
+    ReadSource = read_types.ReadSource
+    MaterializedEntry = read_types.MaterializedEntry
+    IteratorBounds = read_types.IteratorBounds
+    ReadRange = read_types.ReadRange
+    ReadIteratorConfig = read_types.ReadIteratorConfig
+
+    ReadIterator = read_iterators.ReadIterator
+
+    TraceOpKind = read_trace.TraceOpKind
+    ReadTraceOp = read_trace.ReadTraceOp
+    RangeTraceEntry = read_trace.RangeTraceEntry
+    ReadTraceState = read_trace.ReadTraceState
+    ReadTraceStep = read_trace.ReadTraceStep
+    ReadTrace = read_trace.ReadTrace
+
+fn NewReadSource(entries: seq[ReadSourceEntry], priority: int32, kind: ReadSourceKind): ReadSource =
+    return read_types.NewReadSource(entries, priority, kind)
+
+fn WithBounds(lower: option.Option[core_types.Key], upper: option.Option[core_types.Key]): IteratorBounds =
+    return read_types.WithBounds(lower, upper)
+
+fn NewReadRange(lower: option.Option[core_types.Key], upper: option.Option[core_types.Key]): ReadRange =
+    return read_types.NewReadRange(lower, upper)
+
+fn EmptyRange(): ReadRange =
+    return read_types.EmptyRange()
+
+fn InitReadIterator(sources: openArray[ReadSource], config: ReadIteratorConfig): ReadIterator =
+    return read_iterators.InitReadIterator(sources, config)
+
+fn Count(it: ReadIterator): int32 =
+    return read_iterators.Count(it)
+
+fn Valid(it: ReadIterator): bool =
+    return read_iterators.Valid(it)
+
+fn CurrentEntry(it: ReadIterator): MaterializedEntry =
+    return read_iterators.CurrentEntry(it)
+
+fn First(it: ReadIterator): bool =
+    return read_iterators.First(it)
+
+fn Last(it: ReadIterator): bool =
+    return read_iterators.Last(it)
+
+fn Next(it: ReadIterator): bool =
+    return read_iterators.Next(it)
+
+fn Prev(it: ReadIterator): bool =
+    return read_iterators.Prev(it)
+
+fn SeekGE(it: ReadIterator, key: core_types.Key): bool =
+    return read_iterators.SeekGE(it, key)
+
+fn SeekLT(it: ReadIterator, key: core_types.Key): bool =
+    return read_iterators.SeekLT(it, key)
+
+fn SeekPrefixGE(it: ReadIterator, prefix: str, key: core_types.Key): bool =
+    return read_iterators.SeekPrefixGE(it, prefix, key)
+
+fn SetBounds(it: ReadIterator, lower: option.Option[core_types.Key], upper: option.Option[core_types.Key]) =
+    read_iterators.SetBounds(it, lower, upper)
+
+fn ClearBounds(it: ReadIterator) =
+    read_iterators.ClearBounds(it)
+
+fn SetPrefix(it: ReadIterator, prefix: option.Option[str]) =
+    read_iterators.SetPrefix(it, prefix)
+
+fn ClearPrefix(it: ReadIterator) =
+    read_iterators.ClearPrefix(it)
+
+iterator Range(it: ReadIterator, range: ReadRange = EmptyRange(), prefix: option.Option[str] = option.none(str)): MaterializedEntry =
+    for entry in read_iterators.Range(it, range, prefix):
+        yield entry
+
+fn NewTraceOp(kind: TraceOpKind,
+              key: option.Option[str] = option.none(str),
+              prefix: option.Option[str] = option.none(str),
+              lower: option.Option[str] = option.none(str),
+              upper: option.Option[str] = option.none(str)): ReadTraceOp =
+    return read_trace.NewTraceOp(kind, key, prefix, lower, upper)
+
+fn TraceIterator(it: ReadIterator, ops: seq[ReadTraceOp]): ReadTrace =
+    return read_trace.TraceIterator(it, ops)
+
+fn TraceToLines(trace: ReadTrace): seq[str] =
+    return read_trace.TraceToLines(trace)
+
+fn DiffTraces(lhs: ReadTrace, rhs: ReadTrace): seq[str] =
+    return read_trace.DiffTraces(lhs, rhs)

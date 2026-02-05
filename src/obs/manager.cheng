@@ -1,0 +1,200 @@
+module pebble_obs_manager
+
+import "../config/loader.cheng" as config_loader
+import "./events.cheng" as obs_events
+import "./metrics.cheng" as obs_metrics
+import "./ops.cheng" as obs_ops
+import "./profiling.cheng" as obs_profiling
+import "./types.cheng" as obs_types
+import cheng / stdlib / bootstrap / std / strutils as strutils
+import cheng / stdlib / bootstrap / strings as strings
+import cheng / stdlib / bootstrap / std / times as times
+
+type
+    ObservabilityOptions =
+        histogramBuckets: seq[float64]
+        eventBufferSize: int32
+        enableProfiling: bool
+
+type
+    Observability = ref
+        metrics: obs_metrics.MetricsRegistry
+        events: obs_events.EventBus
+        ops: obs_ops.OpsCenter
+        profiler: obs_profiling.Profiler
+
+fn DefaultObservabilityOptions(): ObservabilityOptions =
+    return ObservabilityOptions(
+        histogramBuckets: obs_metrics.DefaultHistogramBuckets,
+        eventBufferSize: 512,
+        enableProfiling: true
+    )
+
+fn PublishEvent(obs: Observability,
+                kind: obs_types.ObsEventKind,
+                message: str,
+                tags: seq[obs_types.LabelPair] = @[],
+                payload: str = "") =
+    if obs == nil or obs.events == nil:
+        return
+    let event = obs_types.ObsEvent(
+        kind: kind,
+        timestamp: times.now(),
+        message: message,
+        tags: obs_types.NewLabelPairs(tags),
+        payload: payload
+    )
+    obs_events.Publish(obs.events, event)
+    if obs.metrics != nil:
+        obs_metrics.IncCounter(obs.metrics, "pebble_events_total",
+            "event counter", @[obs_types.LabelPair(name: "kind", value: strings.`$`(int32(kind)))])
+
+fn ExportPrometheus(obs: Observability): str =
+    if obs == nil or obs.metrics == nil:
+        return ""
+    return obs_metrics.RenderPrometheus(obs.metrics)
+
+fn ExportStatsd(obs: Observability, prefix: str = ""): seq[str] =
+    if obs == nil or obs.metrics == nil:
+        return @[]
+    return obs_metrics.RenderStatsd(obs.metrics, prefix)
+
+fn registerDefaultCommands(obs: Observability) =
+    if obs == nil or obs.ops == nil:
+        return
+    let obsRef = obs
+    obs_ops.RegisterRuntimeCommand(obsRef.ops,
+        "metrics/prometheus", "export prometheus metrics",
+        fn (_: seq[str]): str =
+            if obsRef.metrics == nil:
+                return ""
+            return obs_metrics.RenderPrometheus(obsRef.metrics)
+    )
+    obs_ops.RegisterRuntimeCommand(obsRef.ops,
+        "metrics/statsd", "export statsd metrics",
+        fn (_: seq[str]): str =
+            if obsRef.metrics == nil:
+                return ""
+            let lines = obs_metrics.RenderStatsd(obsRef.metrics)
+            return strutils.join(lines, "\n")
+    )
+    obs_ops.RegisterRuntimeCommand(obsRef.ops,
+        "events/recent", "show recent events",
+        fn (args: seq[str]): str =
+            var limit: int32 = 20
+            if args.len > 0:
+                limit = int32(strutils.parseInt(args[0]))
+                if limit <= 0:
+                    limit = 20
+            let recent = obs_events.Recent(obsRef.events, limit)
+            var lines: seq[str] = @[]
+            var i: int32 = 0
+            while i < recent.len:
+                let event = recent[i]
+                let line = strings.`$`(event.timestamp.unix) &
+                    " " & strings.`$`(int32(event.kind)) & " " & event.message
+                lines.add(line)
+                i = i + 1
+            return strutils.join(lines, "\n")
+    )
+    obs_ops.RegisterRuntimeCommand(obsRef.ops,
+        "config/reload", "poll config reloaders",
+        fn (_: seq[str]): str =
+            obs_ops.PollReloaders(obsRef.ops)
+            PublishEvent(obsRef, obs_types.ObsRuntimeTuning,
+                "manual config reload", @[obs_types.LabelPair(name: "source", value: "command")])
+            return "reload triggered"
+    )
+
+fn NewObservability(options: ObservabilityOptions = DefaultObservabilityOptions()): Observability =
+    let opts = options
+    var metrics = obs_metrics.NewMetricsRegistry(opts.histogramBuckets)
+    var events = obs_events.NewEventBus(opts.eventBufferSize)
+    var opsCenter = obs_ops.NewOpsCenter()
+    var profiler: obs_profiling.Profiler = nil
+    if opts.enableProfiling:
+        profiler = obs_profiling.NewProfiler()
+    if metrics != nil:
+        obs_metrics.DeclareMetric(metrics, obs_types.MetricDescriptor(
+            name: "pebble_events_total",
+            help: "event counter",
+            kind: obs_types.MetricCounter,
+            labelNames: @["kind"],
+            unit: ""
+        ))
+        obs_metrics.DeclareMetric(metrics, obs_types.MetricDescriptor(
+            name: "pebble_config_reload_total",
+            help: "config reload count",
+            kind: obs_types.MetricCounter,
+            labelNames: @["name", "status"],
+            unit: ""
+        ))
+        obs_metrics.DeclareMetric(metrics, obs_types.MetricDescriptor(
+            name: "pebble_metrics_anomaly_total",
+            help: "metrics anomaly count",
+            kind: obs_types.MetricCounter,
+            labelNames: @["metric"],
+            unit: ""
+        ))
+        obs_metrics.DeclareMetric(metrics, obs_types.MetricDescriptor(
+            name: "pebble_hot_swap_result_total",
+            help: "runtime tuning results",
+            kind: obs_types.MetricCounter,
+            labelNames: @["scenario", "result"],
+            unit: ""
+        ))
+    var obs: Observability = new[Observability]()
+    if obs != nil:
+        obs.metrics = metrics
+        obs.events = events
+        obs.ops = opsCenter
+        obs.profiler = profiler
+    registerDefaultCommands(obs)
+    return obs
+
+fn AttachConfigHotReload(obs: Observability,
+                         name: str,
+                         path: str,
+                         intervalMs: int32 = 1000,
+                         callback: obs_ops.ConfigReloadCallback) =
+    if obs == nil or obs.ops == nil:
+        return
+    let obsRef = obs
+    let wrapper = fn (cfg: config_loader.FlatConfig) =
+        if callback != nil:
+            callback(cfg)
+        if obsRef.metrics != nil:
+            obs_metrics.IncCounter(obsRef.metrics,
+                "pebble_config_reload_total",
+                "config reload count",
+                @[obs_types.LabelPair(name: "name", value: name),
+                  obs_types.LabelPair(name: "status", value: "success")])
+        PublishEvent(obsRef, obs_types.ObsConfigReloaded,
+            "config '" & name & "' reloaded", @[obs_types.LabelPair(name: "name", value: name)])
+    let reloader = obs_ops.NewConfigHotReloader(path, wrapper, intervalMs)
+    obs_ops.RegisterReloader(obs.ops, name, reloader)
+
+fn RunMetricSelfChecks(obs: Observability): seq[str] =
+    var issues: seq[str] = @[]
+    if obs == nil or obs.metrics == nil:
+        return issues
+    let snaps = obs_metrics.Snapshot(obs.metrics)
+    var i: int32 = 0
+    while i < snaps.len:
+        let snap = snaps[i]
+        if snap.descriptor.kind == obs_types.MetricCounter:
+            var j: int32 = 0
+            while j < snap.points.len:
+                let point = snap.points[j]
+                if point.value < 0.0:
+                    let msg = "counter " & snap.descriptor.name & " negative"
+                    issues.add(msg)
+                    obs_metrics.IncCounter(obs.metrics,
+                        "pebble_metrics_anomaly_total",
+                        "metrics anomaly count",
+                        @[obs_types.LabelPair(name: "metric", value: snap.descriptor.name)])
+                    PublishEvent(obs, obs_types.ObsMetricAnomaly,
+                        msg, @[obs_types.LabelPair(name: "metric", value: snap.descriptor.name)])
+                j = j + 1
+        i = i + 1
+    return issues

@@ -1,0 +1,130 @@
+module pebble_sstable_filter
+
+import "../core/types.cheng" as core_types
+import "../sstable/types.cheng" as sstable_types
+import "../sstable/encoding.cheng" as enc
+import cheng / stdlib / bootstrap / system as sys
+import cheng / stdlib / bootstrap / strings as strings
+
+const
+    MinBloomBits = 64
+
+type
+    BloomFilterBuilder =
+        bitsPerKey: int32
+        keys: seq[str]
+
+    BloomBuildResult =
+        data: seq[uint8]
+        filter: sstable_types.BloomFilter
+
+fn clampProbes(value: int32): int32 =
+    if value < 1:
+        return 1
+    if value > 16:
+        return 16
+    return value
+
+fn OptimalProbes(bitsPerKey: int32): int32 =
+    if bitsPerKey <= 0:
+        return 1
+    let approx = (bitsPerKey * 69 + 50) / 100
+    return clampProbes(approx)
+
+fn hashMix(key: str, salt: uint32): uint32 =
+    var h: uint32 = uint32(2166136261)
+    var i: int32 = 0
+    let n: int32 = strings.len(key)
+    while i < n:
+        let ch = strings.charAt(key, i)
+        h = (h xor uint32(sys.ord(ch))) * uint32(16777619)
+        i = i + 1
+    h = h xor salt
+    h = h * uint32(16777619)
+    return h xor (h shr 16)
+
+fn InitBloomFilterBuilder(bitsPerKey: int32): BloomFilterBuilder =
+    if bitsPerKey <= 0:
+        raise newException(sstable_types.SSTError, "bitsPerKey must be positive")
+    return BloomFilterBuilder(bitsPerKey: bitsPerKey, keys: @[])
+
+fn AddKey(builder: var BloomFilterBuilder, key: core_types.Key) =
+    builder.keys.add(core_types.ToBytes(key))
+
+fn buildFilter(keys: seq[str], bitsPerKey: int32): sstable_types.BloomFilter =
+    let numProbes = OptimalProbes(bitsPerKey)
+    if keys.len == 0:
+        return sstable_types.BloomFilter(bits: @[], numBits: 0, numProbes: numProbes)
+    var numBits: int32 = keys.len * bitsPerKey
+    if numBits < MinBloomBits:
+        numBits = MinBloomBits
+    let numBytes = (numBits + 7) shr 3
+    var bits = newSeq[uint8](numBytes)
+    const salt1 = uint32(0x47c6a7e5)
+    const salt2 = uint32(0x9e3779b1)
+    var i: int32 = 0
+    while i < keys.len:
+        let key = keys[i]
+        let h1 = hashMix(key, salt1)
+        let h2 = hashMix(key, salt2)
+        var n: int32 = 0
+        while n < numProbes:
+            let combined = h1 + uint32(n) * h2
+            let bitPos = int32(combined mod uint32(numBits))
+            let byteIdx = bitPos shr 3
+            let mask = uint8(1 shl (bitPos & 7))
+            bits[byteIdx] = bits[byteIdx] | mask
+            n = n + 1
+        i = i + 1
+    return sstable_types.BloomFilter(bits: bits, numBits: numBits, numProbes: numProbes)
+
+fn EncodeBloomFilter(filter: sstable_types.BloomFilter): seq[uint8] =
+    var out = newSeq[uint8]()
+    enc.AppendVarint(out, uint64(filter.numBits))
+    enc.AppendVarint(out, uint64(filter.numProbes))
+    var i: int32 = 0
+    while i < filter.bits.len:
+        out.add(filter.bits[i])
+        i = i + 1
+    return out
+
+fn Finish(builder: var BloomFilterBuilder): BloomBuildResult =
+    let filter = buildFilter(builder.keys, builder.bitsPerKey)
+    let data = EncodeBloomFilter(filter)
+    builder.keys.setLen(0)
+    return BloomBuildResult(data: data, filter: filter)
+
+fn DecodeBloomFilter(data: seq[uint8]): sstable_types.BloomFilter =
+    if data.len == 0:
+        return sstable_types.BloomFilter(bits: @[], numBits: 0, numProbes: 0)
+    var pos: int32 = 0
+    let numBits = int32(enc.DecodeVarint(data, &pos))
+    let numProbes = int32(enc.DecodeVarint(data, &pos))
+    if pos > data.len:
+        raise newException(sstable_types.SSTError, "invalid bloom filter encoding")
+    let remaining = data.len - pos
+    var bits = newSeq[uint8](remaining)
+    var idx: int32 = 0
+    while idx < remaining:
+        bits[idx] = data[pos + idx]
+        idx = idx + 1
+    return sstable_types.BloomFilter(bits: bits, numBits: numBits, numProbes: numProbes)
+
+fn MaybeContains(filter: sstable_types.BloomFilter, key: core_types.Key): bool =
+    if filter.numBits == 0 or filter.bits.len == 0:
+        return true
+    const salt1 = uint32(0x47c6a7e5)
+    const salt2 = uint32(0x9e3779b1)
+    let keyBytes = core_types.ToBytes(key)
+    let h1 = hashMix(keyBytes, salt1)
+    let h2 = hashMix(keyBytes, salt2)
+    var n: int32 = 0
+    while n < filter.numProbes:
+        let combined = h1 + uint32(n) * h2
+        let bitPos = int32(combined mod uint32(filter.numBits))
+        let byteIdx = bitPos shr 3
+        let mask = uint8(1 shl (bitPos & 7))
+        if (filter.bits[byteIdx] & mask) == uint8(0):
+            return false
+        n = n + 1
+    return true

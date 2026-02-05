@@ -1,0 +1,430 @@
+module pebble_wal_writer
+
+import "../runtime/executor.cheng" as exec
+import "../wal/checksum.cheng" as checksum
+import "../wal/recycler.cheng" as recycler
+import "../wal/types.cheng" as wal_types
+import cheng / stdlib / bootstrap / strings as strings
+import cheng / stdlib / bootstrap / std / os as os
+import cheng / stdlib / bootstrap / core / option as option
+
+@importc("cheng_fwrite")
+fn c_fwrite(ptr: void*, size: int32, n: int32, stream: os.File): int32
+@importc("cheng_fflush")
+fn c_fflush(stream: os.File): int32
+@importc("fileno")
+fn c_fileno(stream: os.File): int32
+@importc("fsync")
+fn c_fsync(fd: int32): int32
+@importc("ftruncate")
+fn c_ftruncate(fd: int32, length: int64): int32
+
+const
+    DefaultFormat = wal_types.WireRecyclable
+
+type
+    SegmentAllocator = fn (index: int32): str
+
+type
+    WalWriterConfig =
+        allocator: SegmentAllocator
+        recycler: recycler.LogRecycler
+        format: wal_types.WireFormat
+        logNumber: uint32
+        maxSegmentBytes: int64
+        executor: exec.Executor
+        autoSyncOffsets: bool
+        autoSyncBytes: int64
+        maxPendingAutoSyncs: int32
+
+type
+    WalAppendOptions =
+        requireSync: bool
+        metadata: wal_types.WalRecordMetadata
+        forceRotation: bool
+
+type
+    WalAppendResult =
+        offset: int64
+        bytesWritten: int32
+        syncHandle: exec.TaskHandle
+        segmentPath: str
+
+type
+    WalWriter = ref
+        cfg: WalWriterConfig
+        segmentIndex: int32
+        segmentPath: str
+        file: os.File
+        blockOffset: int32
+        segmentBytes: int64
+        totalBytes: int64
+        pending: seq[exec.TaskHandle]
+        bytesSinceSync: int64
+        closed: bool
+
+fn ensureAllocator(cfg: WalWriterConfig) =
+    if cfg.allocator == nil:
+        raise newException(wal_types.WalError, "WAL allocator must not be nil")
+
+fn defaultAllocator(path: str): SegmentAllocator =
+    return fn (index: int32): str =
+        if index == 0:
+            return path
+        let parts = os.splitFile(path)
+        let name = parts.name & "." & strings.`$`(index) & parts.ext
+        return os.joinPath(parts.dir, name)
+
+fn ensureParentDir(path: str) =
+    let parts = os.splitFile(path)
+    let dir = parts.dir
+    if dir.len > 0 and not os.dirExists(dir):
+        os.createDir(dir)
+
+fn writeBytes(file: os.File, data: seq[uint8]) =
+    if data.len == 0:
+        return
+    var remaining: int32 = data.len
+    var offset: int32 = 0
+    while remaining > 0:
+        let ptr = ptr_add(data.buffer, offset)
+        let wrote = c_fwrite(ptr, 1, remaining, file)
+        if wrote <= 0:
+            raise newException(wal_types.WalError, "failed to write WAL bytes")
+        offset = offset + wrote
+        remaining = remaining - wrote
+
+fn flushFile(file: os.File) =
+    if file == nil:
+        return
+    if c_fflush(file) != 0:
+        raise newException(wal_types.WalError, "failed to flush WAL file")
+
+fn syncFile(file: os.File) =
+    if file == nil:
+        return
+    flushFile(file)
+    let fd = c_fileno(file)
+    if fd < 0:
+        raise newException(wal_types.WalError, "failed to resolve WAL file descriptor")
+    if c_fsync(fd) != 0:
+        raise newException(wal_types.WalError, "failed to fsync WAL file")
+
+fn padBlock(writer: WalWriter) =
+    let remaining = wal_types.blockSize - writer.blockOffset
+    if remaining <= 0:
+        return
+    var zeros = newSeq[uint8](remaining)
+    writeBytes(writer.file, zeros)
+    writer.blockOffset = 0
+    writer.segmentBytes = writer.segmentBytes + int64(remaining)
+    writer.totalBytes = writer.totalBytes + int64(remaining)
+
+fn closeCurrentSegment(writer: WalWriter, recycle: bool) =
+    if writer.file != nil:
+        for handle in writer.pending:
+            exec.Wait(handle)
+        writer.pending.setLen(0)
+        syncFile(writer.file)
+        os.close(writer.file)
+        writer.file = nil
+        if recycle and writer.cfg.recycler != nil and writer.segmentPath.len > 0:
+            recycler.Recycle(writer.cfg.recycler,
+                recycler.RecyclableFile(path: writer.segmentPath,
+                                        size: writer.segmentBytes))
+    writer.blockOffset = 0
+    writer.segmentBytes = 0
+    writer.bytesSinceSync = 0
+
+fn openSegment(writer: WalWriter, index: int32, recyclePrev: bool) =
+    closeCurrentSegment(writer, recyclePrev)
+    let path = writer.cfg.allocator(index)
+    var reused = option.none(recycler.RecyclableFile)
+    if writer.cfg.recycler != nil:
+        reused = recycler.Acquire(writer.cfg.recycler)
+    if option.IsSome(reused):
+        let file = option.Get(reused)
+        if file.path != path:
+            if os.fileExists(path):
+                discard os.removeFile(path)
+            discard os.renameFile(file.path, path)
+    ensureParentDir(path)
+    writer.file = os.open(path, os.fmWrite)
+    if writer.file == nil:
+        raise newException(wal_types.WalError, "unable to open WAL segment: " & path)
+    writer.segmentPath = path
+    writer.blockOffset = 0
+    writer.segmentBytes = 0
+
+fn headerSize(format: wal_types.WireFormat): int32 =
+    if format == wal_types.WireLegacy:
+        return wal_types.legacyHeaderSize
+    if format == wal_types.WireRecyclable:
+        return wal_types.recyclableHeaderSize
+    if format == wal_types.WireWalSync:
+        return wal_types.walSyncHeaderSize
+    return 0
+
+fn flushNow(writer: WalWriter): exec.TaskHandle =
+    if writer.cfg.executor == nil:
+        syncFile(writer.file)
+        return nil
+    return exec.Submit(writer.cfg.executor, fn () =
+        syncFile(writer.file)
+    )
+
+fn cleanupPending(writer: WalWriter) =
+    if writer.pending.len == 0:
+        return
+    var active = newSeq[exec.TaskHandle]()
+    for handle in writer.pending:
+        if handle == nil:
+            continue
+        if exec.IsPending(handle):
+            active.add(handle)
+        else:
+            exec.Wait(handle)
+    writer.pending = active
+
+fn trackPending(writer: WalWriter, handle: exec.TaskHandle) =
+    if handle == nil:
+        return
+    cleanupPending(writer)
+    if writer.cfg.maxPendingAutoSyncs > 0:
+        while writer.pending.len >= writer.cfg.maxPendingAutoSyncs:
+            let waitHandle = writer.pending[0]
+            writer.pending.delete(0)
+            exec.Wait(waitHandle)
+            cleanupPending(writer)
+    writer.pending.add(handle)
+
+fn maybeAutoSync(writer: WalWriter, bytesWritten: int32) =
+    if bytesWritten <= 0 or writer.cfg.autoSyncBytes <= 0:
+        return
+    writer.bytesSinceSync = writer.bytesSinceSync + int64(bytesWritten)
+    if writer.bytesSinceSync >= writer.cfg.autoSyncBytes:
+        let handle = flushNow(writer)
+        if handle != nil:
+            trackPending(writer, handle)
+        writer.bytesSinceSync = 0
+
+fn writeChunk(writer: WalWriter,
+              chunkType: wal_types.ChunkType,
+              payload: seq[uint8],
+              metadata: wal_types.WalRecordMetadata) =
+    var header = newSeq[uint8](headerSize(writer.cfg.format))
+    let payloadLen = uint16(payload.len)
+    var crc = checksum.Extend(uint32(0), checksum.FromByte(uint8(chunkType)))
+    if wal_types.IsReusable(writer.cfg.format):
+        crc = checksum.Extend(crc, checksum.FromUInt32(metadata.logNumber))
+    if wal_types.HasSyncOffset(writer.cfg.format):
+        crc = checksum.Extend(crc, checksum.FromUInt64(metadata.syncOffset))
+    if payload.len > 0:
+        crc = checksum.Extend(crc, payload)
+    let checksumMasked = checksum.MaskChecksum(crc)
+    header[0] = uint8(checksumMasked & uint32(0xFF))
+    header[1] = uint8((checksumMasked shr 8) & uint32(0xFF))
+    header[2] = uint8((checksumMasked shr 16) & uint32(0xFF))
+    header[3] = uint8((checksumMasked shr 24) & uint32(0xFF))
+    header[4] = uint8(payloadLen & uint16(0xFF))
+    header[5] = uint8((payloadLen shr 8) & uint16(0xFF))
+    header[6] = uint8(chunkType)
+    var idx: int32 = 7
+    if wal_types.IsReusable(writer.cfg.format):
+        let logBytes = checksum.FromUInt32(metadata.logNumber)
+        var i: int32 = 0
+        while i < 4:
+            header[idx] = logBytes[i]
+            idx = idx + 1
+            i = i + 1
+    if wal_types.HasSyncOffset(writer.cfg.format):
+        let syncBytes = checksum.FromUInt64(metadata.syncOffset)
+        var i: int32 = 0
+        while i < 8:
+            header[idx] = syncBytes[i]
+            idx = idx + 1
+            i = i + 1
+    writeBytes(writer.file, header)
+    writeBytes(writer.file, payload)
+    writer.blockOffset = writer.blockOffset + header.len + payload.len
+    writer.segmentBytes = writer.segmentBytes + int64(header.len + payload.len)
+    writer.totalBytes = writer.totalBytes + int64(header.len + payload.len)
+
+fn rotateIfNeeded(writer: WalWriter, force: bool) =
+    if force or (writer.cfg.maxSegmentBytes > 0 and writer.segmentBytes >= writer.cfg.maxSegmentBytes):
+        writer.segmentIndex = writer.segmentIndex + 1
+        openSegment(writer, writer.segmentIndex, true)
+
+fn NewWalWriterWithConfig(cfg: WalWriterConfig): WalWriter =
+    ensureAllocator(cfg)
+    var normalized = cfg
+    if normalized.autoSyncBytes < 0:
+        normalized.autoSyncBytes = 0
+    if normalized.maxPendingAutoSyncs < 0:
+        normalized.maxPendingAutoSyncs = 0
+    var writer: WalWriter = new[WalWriter]()
+    if writer == nil:
+        return writer
+    writer.cfg = normalized
+    writer.segmentIndex = 0
+    writer.pending = @[]
+    writer.totalBytes = 0
+    writer.bytesSinceSync = 0
+    writer.closed = false
+    openSegment(writer, writer.segmentIndex, false)
+    return writer
+
+fn NewWalWriter(path: str,
+                format: wal_types.WireFormat = DefaultFormat,
+                logNumber: uint32 = 0,
+                maxSegmentBytes: int64 = 0,
+                recycler: recycler.LogRecycler = nil,
+                executor: exec.Executor = nil,
+                autoSyncOffsets: bool = true,
+                autoSyncBytes: int64 = 0,
+                maxPendingAutoSyncs: int32 = 0): WalWriter =
+    let cfg = WalWriterConfig(
+        allocator: defaultAllocator(path),
+        recycler: recycler,
+        format: format,
+        logNumber: logNumber,
+        maxSegmentBytes: maxSegmentBytes,
+        executor: executor,
+        autoSyncOffsets: autoSyncOffsets,
+        autoSyncBytes: autoSyncBytes,
+        maxPendingAutoSyncs: maxPendingAutoSyncs
+    )
+    return NewWalWriterWithConfig(cfg)
+
+fn Append(writer: WalWriter,
+          payload: seq[uint8],
+          options: WalAppendOptions = WalAppendOptions()): WalAppendResult =
+    if writer == nil or writer.closed:
+        raise newException(wal_types.WalError, "wal writer already closed")
+    if options.forceRotation:
+        rotateIfNeeded(writer, true)
+    var metadata = options.metadata
+    if metadata.logNumber == uint32(0):
+        metadata.logNumber = writer.cfg.logNumber
+    var recordOffset: int64 = -1
+    var recordSegmentPath = writer.segmentPath
+    let headerBytes = headerSize(writer.cfg.format)
+    var writtenBytes: int32 = 0
+    let totalLen = payload.len
+    if totalLen == 0:
+        if writer.cfg.maxSegmentBytes > 0 and
+           writer.segmentBytes + int64(headerBytes) > writer.cfg.maxSegmentBytes and
+           writer.segmentBytes > 0:
+            rotateIfNeeded(writer, true)
+        if wal_types.blockSize - writer.blockOffset < headerBytes:
+            padBlock(writer)
+        if recordOffset < 0:
+            recordOffset = writer.segmentBytes
+            recordSegmentPath = writer.segmentPath
+        var chunkMeta = metadata
+        let chunkStart = writer.segmentBytes
+        if wal_types.HasSyncOffset(writer.cfg.format):
+            if chunkMeta.syncOffset == 0 and writer.cfg.autoSyncOffsets:
+                chunkMeta.syncOffset = uint64(chunkStart + int64(headerBytes))
+            elif chunkMeta.syncOffset < uint64(chunkStart):
+                raise newException(wal_types.WalError, "sync offset regression detected")
+        writeChunk(writer, wal_types.ChunkTypeFor(wal_types.ChunkPosFull, writer.cfg.format), @[], chunkMeta)
+        writtenBytes = headerBytes
+    else:
+        var remaining = totalLen
+        var cursor: int32 = 0
+        while remaining > 0:
+            if wal_types.blockSize - writer.blockOffset < headerBytes:
+                padBlock(writer)
+                continue
+            let usable = max(0, wal_types.blockSize - writer.blockOffset - headerBytes)
+            if usable == 0:
+                padBlock(writer)
+                continue
+            let chunkLen = min(remaining, usable)
+            if writer.cfg.maxSegmentBytes > 0 and
+               writer.segmentBytes + (int64(headerBytes) + int64(chunkLen)) > writer.cfg.maxSegmentBytes and
+               writer.segmentBytes > 0:
+                rotateIfNeeded(writer, true)
+                continue
+            let position =
+                if cursor == 0 and chunkLen == remaining: wal_types.ChunkPosFull
+                elif cursor == 0: wal_types.ChunkPosFirst
+                elif chunkLen == remaining: wal_types.ChunkPosLast
+                else: wal_types.ChunkPosMiddle
+            let chunkType = wal_types.ChunkTypeFor(position, writer.cfg.format)
+            if chunkType == wal_types.ChunkInvalid:
+                raise newException(wal_types.WalError, "invalid chunk type encoding")
+            var chunkData = newSeq[uint8](chunkLen)
+            var i: int32 = 0
+            while i < chunkLen:
+                chunkData[i] = payload[cursor + i]
+                i = i + 1
+            var chunkMeta = metadata
+            let chunkStart = writer.segmentBytes
+            let chunkAdvance = int64(headerBytes) + int64(chunkLen)
+            if wal_types.HasSyncOffset(writer.cfg.format):
+                if chunkMeta.syncOffset == 0 and writer.cfg.autoSyncOffsets:
+                    chunkMeta.syncOffset = uint64(chunkStart + chunkAdvance)
+                elif chunkMeta.syncOffset < uint64(chunkStart):
+                    raise newException(wal_types.WalError, "sync offset regression detected")
+            if recordOffset < 0:
+                recordOffset = chunkStart
+                recordSegmentPath = writer.segmentPath
+            writeChunk(writer, chunkType, chunkData, chunkMeta)
+            remaining = remaining - chunkLen
+            cursor = cursor + chunkLen
+            writtenBytes = writtenBytes + headerBytes + chunkLen
+    if recordOffset < 0:
+        recordOffset = writer.segmentBytes
+        recordSegmentPath = writer.segmentPath
+    var result = WalAppendResult(offset: recordOffset,
+                                 bytesWritten: writtenBytes,
+                                 syncHandle: nil,
+                                 segmentPath: recordSegmentPath)
+    if options.requireSync:
+        if writer.cfg.autoSyncBytes > 0:
+            writer.bytesSinceSync = writer.bytesSinceSync + int64(writtenBytes)
+        let handle = flushNow(writer)
+        writer.bytesSinceSync = 0
+        result.syncHandle = handle
+    else:
+        maybeAutoSync(writer, writtenBytes)
+    return result
+
+fn AppendString(writer: WalWriter, payload: str,
+                options: WalAppendOptions = WalAppendOptions()): WalAppendResult =
+    var data = newSeq[uint8](payload.len)
+    var i: int32 = 0
+    while i < payload.len:
+        data[i] = uint8(ord(strings.charAt(payload, i)))
+        i = i + 1
+    return Append(writer, data, options)
+
+fn Close(writer: WalWriter) =
+    if writer == nil or writer.closed:
+        return
+    closeCurrentSegment(writer, true)
+    writer.closed = true
+
+fn TrimTail(writer: WalWriter) =
+    if writer == nil or writer.file == nil:
+        return
+    for handle in writer.pending:
+        exec.Wait(handle)
+    writer.pending.setLen(0)
+    writer.bytesSinceSync = 0
+    let fd = c_fileno(writer.file)
+    if fd >= 0 and writer.segmentBytes >= 0:
+        if c_ftruncate(fd, writer.segmentBytes) != 0:
+            raise newException(wal_types.WalError, "failed to truncate WAL tail")
+    syncFile(writer.file)
+
+fn Sync(writer: WalWriter) =
+    if writer == nil or writer.file == nil:
+        return
+    for handle in writer.pending:
+        exec.Wait(handle)
+    writer.pending.setLen(0)
+    writer.bytesSinceSync = 0
+    syncFile(writer.file)

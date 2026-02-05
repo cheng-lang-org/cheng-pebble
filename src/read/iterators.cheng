@@ -1,0 +1,283 @@
+module pebble_read_iterators
+
+import "../core/types.cheng" as core_types
+import "../read/types.cheng" as read_types
+import cheng / stdlib / bootstrap / core / option as option
+import cheng / stdlib / bootstrap / strings as strings
+import cheng / stdlib / bootstrap / tables as tables
+
+type
+    ReadIterator = ref
+        comparator: core_types.Comparator
+        allEntries: seq[read_types.MaterializedEntry]
+        filtered: seq[read_types.MaterializedEntry]
+        idx: int32
+        validFlag: bool
+        bounds: read_types.ReadRange
+        prefixFilter: option.Option[str]
+        segmentSize: int32
+        prefetchDistance: int32
+        maxCachedSegments: int32
+
+type
+    Candidate =
+        priority: int32
+        order: int32
+        value: option.Option[str]
+        key: core_types.Key
+        kind: read_types.ReadSourceKind
+
+fn startsWith(text: str, prefix: str): bool =
+    if prefix == nil or strings.len(prefix) == 0:
+        return true
+    if text == nil:
+        return false
+    let n: int32 = strings.len(text)
+    let m: int32 = strings.len(prefix)
+    if n < m:
+        return false
+    var i: int32 = 0
+    while i < m:
+        if strings.charAt(text, i) != strings.charAt(prefix, i):
+            return false
+        i = i + 1
+    return true
+
+fn sortEntries(entries: var seq[read_types.MaterializedEntry], comparator: core_types.Comparator) =
+    if entries.len <= 1:
+        return
+    var i: int32 = 0
+    while i < entries.len:
+        var j: int32 = i + 1
+        while j < entries.len:
+            if comparator(entries[j].key, entries[i].key) < 0:
+                let tmp = entries[i]
+                entries[i] = entries[j]
+                entries[j] = tmp
+            j = j + 1
+        i = i + 1
+
+fn materializeEntries(sources: openArray[read_types.ReadSource],
+                      comparator: core_types.Comparator): seq[read_types.MaterializedEntry] =
+    var best = tables.TableInit[Candidate](64)
+    var order: int32 = 0
+    while order < sources.len:
+        let source = sources[order]
+        var i: int32 = 0
+        while i < source.entries.len:
+            let entry = source.entries[i]
+            let keyBytes = core_types.ToBytes(entry.key)
+            let candidate = Candidate(priority: source.priority,
+                                      order: order,
+                                      value: entry.value,
+                                      key: entry.key,
+                                      kind: source.kind)
+            if tables.TableHas[Candidate](best, keyBytes):
+                let existing = tables.TableGet[Candidate](best, keyBytes)
+                if candidate.priority < existing.priority or
+                   (candidate.priority == existing.priority and candidate.order < existing.order):
+                    tables.TablePut[Candidate](best, keyBytes, candidate)
+            else:
+                tables.TablePut[Candidate](best, keyBytes, candidate)
+            i = i + 1
+        order = order + 1
+    var idx: int32 = 0
+    var key: str = ""
+    var val: Candidate
+    while tables.TableNext[Candidate](best, &idx, &key, &val):
+        if option.IsSome(val.value):
+            result.add(read_types.MaterializedEntry(
+                key: val.key,
+                value: option.Get(val.value),
+                sourcePriority: val.priority,
+                sourceKind: val.kind
+            ))
+    if result.len > 1:
+        sortEntries(result, comparator)
+
+fn inRange(range: read_types.ReadRange, comparator: core_types.Comparator, key: core_types.Key): bool =
+    if option.IsSome(range.lower):
+        if comparator(key, option.Get(range.lower)) < 0:
+            return false
+    if option.IsSome(range.upper):
+        if comparator(key, option.Get(range.upper)) >= 0:
+            return false
+    return true
+
+fn matchesPrefix(prefix: option.Option[str], key: core_types.Key): bool =
+    if option.IsSome(prefix):
+        return startsWith(core_types.ToBytes(key), option.Get(prefix))
+    return true
+
+fn rebuildFiltered(it: ReadIterator) =
+    it.filtered.setLen(0)
+    var i: int32 = 0
+    while i < it.allEntries.len:
+        let entry = it.allEntries[i]
+        if inRange(it.bounds, it.comparator, entry.key) and
+           matchesPrefix(it.prefixFilter, entry.key):
+            it.filtered.add(entry)
+        i = i + 1
+    it.idx = -1
+    it.validFlag = false
+
+fn InitReadIterator(sources: openArray[read_types.ReadSource],
+                    config: read_types.ReadIteratorConfig): ReadIterator =
+    var it: ReadIterator = new[ReadIterator]()
+    if it == nil:
+        return it
+    var comp = config.comparator
+    if comp == nil:
+        comp = core_types.CompareBytewise
+    it.comparator = comp
+    it.bounds = config.bounds
+    it.prefixFilter = config.prefix
+    it.idx = -1
+    it.validFlag = false
+    it.segmentSize = if config.segmentSize > 0: config.segmentSize else: 64
+    if config.prefetchDistance > 0:
+        it.prefetchDistance = config.prefetchDistance
+    elif config.prefetchDistance == 0:
+        it.prefetchDistance = 1
+    else:
+        it.prefetchDistance = -1
+    if config.maxCachedSegments > 0:
+        it.maxCachedSegments = config.maxCachedSegments
+    else:
+        it.maxCachedSegments = 8
+    it.allEntries = materializeEntries(sources, it.comparator)
+    it.filtered = @[]
+    rebuildFiltered(it)
+    return it
+
+fn Count(it: ReadIterator): int32 =
+    if it == nil:
+        return 0
+    return it.filtered.len
+
+fn SetRange(it: ReadIterator, range: read_types.ReadRange) =
+    it.bounds = range
+    rebuildFiltered(it)
+
+fn SetBounds(it: ReadIterator,
+             lower: option.Option[core_types.Key],
+             upper: option.Option[core_types.Key]) =
+    SetRange(it, read_types.NewReadRange(lower, upper))
+
+fn ClearBounds(it: ReadIterator) =
+    SetRange(it, read_types.EmptyRange())
+
+fn CurrentRange(it: ReadIterator): read_types.ReadRange =
+    return it.bounds
+
+fn SetPrefix(it: ReadIterator, prefix: option.Option[str]) =
+    it.prefixFilter = prefix
+    rebuildFiltered(it)
+
+fn ClearPrefix(it: ReadIterator) =
+    SetPrefix(it, option.none(str))
+
+fn Valid(it: ReadIterator): bool =
+    if it == nil:
+        return false
+    return it.validFlag
+
+fn CurrentEntry(it: ReadIterator): read_types.MaterializedEntry =
+    if not Valid(it):
+        raise newException(read_types.ReadError, "iterator is not valid")
+    return it.filtered[it.idx]
+
+fn Key(it: ReadIterator): core_types.Key =
+    return CurrentEntry(it).key
+
+fn Value(it: ReadIterator): str =
+    return CurrentEntry(it).value
+
+fn position(it: ReadIterator, newIdx: int32): bool =
+    if newIdx >= 0 and newIdx < it.filtered.len:
+        it.idx = newIdx
+        it.validFlag = true
+        return true
+    it.idx = newIdx
+    it.validFlag = false
+    return false
+
+fn First(it: ReadIterator): bool =
+    if it.filtered.len == 0:
+        it.idx = -1
+        it.validFlag = false
+        return false
+    return position(it, 0)
+
+fn Last(it: ReadIterator): bool =
+    if it.filtered.len == 0:
+        it.idx = -1
+        it.validFlag = false
+        return false
+    return position(it, it.filtered.len - 1)
+
+fn Next(it: ReadIterator): bool =
+    if not Valid(it):
+        return First(it)
+    return position(it, it.idx + 1)
+
+fn Prev(it: ReadIterator): bool =
+    if not Valid(it):
+        return Last(it)
+    return position(it, it.idx - 1)
+
+fn SeekGE(it: ReadIterator, key: core_types.Key): bool =
+    if it.filtered.len == 0:
+        it.idx = -1
+        it.validFlag = false
+        return false
+    var lo: int32 = 0
+    var hi: int32 = it.filtered.len
+    while lo < hi:
+        let mid = (lo + hi) shr 1
+        let cmp = it.comparator(it.filtered[mid].key, key)
+        if cmp < 0:
+            lo = mid + 1
+        else:
+            hi = mid
+    return position(it, lo)
+
+fn SeekLT(it: ReadIterator, key: core_types.Key): bool =
+    if it.filtered.len == 0:
+        it.idx = -1
+        it.validFlag = false
+        return false
+    var lo: int32 = 0
+    var hi: int32 = it.filtered.len
+    while lo < hi:
+        let mid = (lo + hi) shr 1
+        let cmp = it.comparator(it.filtered[mid].key, key)
+        if cmp < 0:
+            lo = mid + 1
+        else:
+            hi = mid
+    return position(it, lo - 1)
+
+fn SeekPrefixGE(it: ReadIterator, prefix: str, key: core_types.Key): bool =
+    SetPrefix(it, option.some(prefix))
+    return SeekGE(it, key)
+
+iterator Range(it: ReadIterator,
+               range: read_types.ReadRange = read_types.EmptyRange(),
+               prefix: option.Option[str] = option.none(str)): read_types.MaterializedEntry =
+    if it == nil:
+        return
+    let effectivePrefix = if option.IsSome(prefix): prefix else: it.prefixFilter
+    let effectiveRange =
+        if option.IsSome(range.lower) or option.IsSome(range.upper): range else: it.bounds
+    var idx: int32 = 0
+    while idx < it.filtered.len:
+        let entry = it.filtered[idx]
+        if not inRange(effectiveRange, it.comparator, entry.key):
+            idx = idx + 1
+            continue
+        if not matchesPrefix(effectivePrefix, entry.key):
+            idx = idx + 1
+            continue
+        yield entry
+        idx = idx + 1

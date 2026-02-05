@@ -1,0 +1,119 @@
+module pebble_wal_types
+
+const
+    blockSize = 32 * 1024
+    blockSizeMask = blockSize - 1
+    legacyHeaderSize = 7
+    recyclableHeaderSize = legacyHeaderSize + 4
+    walSyncHeaderSize = recyclableHeaderSize + 8
+    chunkTypeCount = 13
+
+type
+    WalError =
+        of CatchableError
+
+type
+    ChunkType = enum
+        ChunkInvalid
+        ChunkFull
+        ChunkFirst
+        ChunkMiddle
+        ChunkLast
+        ChunkRecyclableFull
+        ChunkRecyclableFirst
+        ChunkRecyclableMiddle
+        ChunkRecyclableLast
+        ChunkWalSyncFull
+        ChunkWalSyncFirst
+        ChunkWalSyncMiddle
+        ChunkWalSyncLast
+
+type
+    ChunkPosition = enum
+        ChunkPosInvalid
+        ChunkPosFull
+        ChunkPosFirst
+        ChunkPosMiddle
+        ChunkPosLast
+
+type
+    WireFormat = enum
+        WireInvalid
+        WireLegacy
+        WireRecyclable
+        WireWalSync
+
+type
+    HeaderFormat =
+        position: ChunkPosition
+        format: WireFormat
+        headerSize: int32
+
+const
+    chunkFormatTable: array[chunkTypeCount, HeaderFormat] = [
+        HeaderFormat(position: ChunkPosInvalid, format: WireInvalid, headerSize: 0),
+        HeaderFormat(position: ChunkPosFull, format: WireLegacy, headerSize: legacyHeaderSize),
+        HeaderFormat(position: ChunkPosFirst, format: WireLegacy, headerSize: legacyHeaderSize),
+        HeaderFormat(position: ChunkPosMiddle, format: WireLegacy, headerSize: legacyHeaderSize),
+        HeaderFormat(position: ChunkPosLast, format: WireLegacy, headerSize: legacyHeaderSize),
+        HeaderFormat(position: ChunkPosFull, format: WireRecyclable, headerSize: recyclableHeaderSize),
+        HeaderFormat(position: ChunkPosFirst, format: WireRecyclable, headerSize: recyclableHeaderSize),
+        HeaderFormat(position: ChunkPosMiddle, format: WireRecyclable, headerSize: recyclableHeaderSize),
+        HeaderFormat(position: ChunkPosLast, format: WireRecyclable, headerSize: recyclableHeaderSize),
+        HeaderFormat(position: ChunkPosFull, format: WireWalSync, headerSize: walSyncHeaderSize),
+        HeaderFormat(position: ChunkPosFirst, format: WireWalSync, headerSize: walSyncHeaderSize),
+        HeaderFormat(position: ChunkPosMiddle, format: WireWalSync, headerSize: walSyncHeaderSize),
+        HeaderFormat(position: ChunkPosLast, format: WireWalSync, headerSize: walSyncHeaderSize)
+    ]
+
+fn headerIndex(typ: ChunkType): int32 =
+    return (int32)(typ)
+
+fn HeaderSize(typ: ChunkType): int32 =
+    return chunkFormatTable[headerIndex(typ)].headerSize
+
+fn HeaderFormatFor(typ: ChunkType): HeaderFormat =
+    return chunkFormatTable[headerIndex(typ)]
+
+fn ChunkPositionOf(typ: ChunkType): ChunkPosition =
+    return chunkFormatTable[headerIndex(typ)].position
+
+fn WireFormatOf(typ: ChunkType): WireFormat =
+    return chunkFormatTable[headerIndex(typ)].format
+
+fn ChunkTypeFor(pos: ChunkPosition, format: WireFormat): ChunkType =
+    if format == WireLegacy:
+        if pos == ChunkPosFull: return ChunkFull
+        if pos == ChunkPosFirst: return ChunkFirst
+        if pos == ChunkPosMiddle: return ChunkMiddle
+        if pos == ChunkPosLast: return ChunkLast
+        return ChunkInvalid
+    if format == WireRecyclable:
+        if pos == ChunkPosFull: return ChunkRecyclableFull
+        if pos == ChunkPosFirst: return ChunkRecyclableFirst
+        if pos == ChunkPosMiddle: return ChunkRecyclableMiddle
+        if pos == ChunkPosLast: return ChunkRecyclableLast
+        return ChunkInvalid
+    if format == WireWalSync:
+        if pos == ChunkPosFull: return ChunkWalSyncFull
+        if pos == ChunkPosFirst: return ChunkWalSyncFirst
+        if pos == ChunkPosMiddle: return ChunkWalSyncMiddle
+        if pos == ChunkPosLast: return ChunkWalSyncLast
+        return ChunkInvalid
+    return ChunkInvalid
+
+fn IsReusable(format: WireFormat): bool =
+    return format == WireRecyclable or format == WireWalSync
+
+fn HasSyncOffset(format: WireFormat): bool =
+    return format == WireWalSync
+
+type
+    WalRecordMetadata =
+        logNumber: uint32
+        syncOffset: uint64
+
+type
+    WalReadResult =
+        payload: seq[uint8]
+        metadata: WalRecordMetadata

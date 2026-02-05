@@ -1,0 +1,246 @@
+module pebble_obs_ops
+
+import "../config/loader.cheng" as config_loader
+import "./types.cheng" as obs_types
+import cheng / stdlib / bootstrap / tables as tables
+import cheng / stdlib / bootstrap / strings as strings
+import cheng / stdlib / bootstrap / std / os as os
+import cheng / stdlib / bootstrap / os as boot_os
+import cheng / stdlib / bootstrap / std / times as times
+
+type
+    ConfigReloadCallback = fn (cfg: config_loader.FlatConfig)
+
+type
+    ConfigHotReloader = ref
+        path: str
+        intervalMs: int32
+        callback: ConfigReloadCallback
+        lastCheckMs: int64
+        lastMtime: int64
+        active: bool
+
+type
+    RuntimeCommandEntry =
+        handler: obs_types.RuntimeCommand
+        help: str
+
+type
+    RuntimeCommandRegistry = ref
+        entries: tables.Table[RuntimeCommandEntry]
+
+type
+    TelemetryCatalog = ref
+        fields: seq[obs_types.TelemetryField]
+
+type
+    DashboardLibrary = ref
+        templates: seq[obs_types.DashboardTemplate]
+
+type
+    OpsCenter = ref
+        reloaders: tables.Table[ConfigHotReloader]
+        registry: RuntimeCommandRegistry
+        telemetry: TelemetryCatalog
+        dashboards: DashboardLibrary
+
+fn NowMs(): int64 =
+    return int64(times.epochTime() * 1000.0)
+
+fn NewRuntimeCommandRegistry(): RuntimeCommandRegistry =
+    var registry: RuntimeCommandRegistry = new[RuntimeCommandRegistry]()
+    if registry != nil:
+        registry.entries = tables.TableInit[RuntimeCommandEntry](32)
+    return registry
+
+fn RegisterCommand(registry: RuntimeCommandRegistry,
+                   name: str,
+                   help: str,
+                   handler: obs_types.RuntimeCommand) =
+    if registry == nil or handler == nil or strings.len(name) == 0:
+        return
+    tables.TablePut[RuntimeCommandEntry](registry.entries, name,
+        RuntimeCommandEntry(handler: handler, help: help))
+
+fn ExecuteCommand(registry: RuntimeCommandRegistry,
+                  name: str,
+                  args: seq[str]): tuple[ok: bool, output: str] =
+    if registry == nil:
+        return (false, "registry not initialized")
+    if not tables.TableHas[RuntimeCommandEntry](registry.entries, name):
+        return (false, "unknown command: " & name)
+    let entry = tables.TableGet[RuntimeCommandEntry](registry.entries, name)
+    if entry.handler == nil:
+        return (false, "command not available: " & name)
+    let output = entry.handler(args)
+    return (true, output)
+
+fn ListCommands(registry: RuntimeCommandRegistry): seq[tuple[name: str, help: str]] =
+    var out: seq[tuple[name: str, help: str]] = @[]
+    if registry == nil:
+        return out
+    var idx: int32 = 0
+    var key: str = ""
+    var entry: RuntimeCommandEntry
+    while tables.TableNext[RuntimeCommandEntry](registry.entries, &idx, &key, &entry):
+        out.add((name: key, help: entry.help))
+    return out
+
+fn NewConfigHotReloader(path: str,
+                        callback: ConfigReloadCallback,
+                        intervalMs: int32 = 1000): ConfigHotReloader =
+    var reloader: ConfigHotReloader = new[ConfigHotReloader]()
+    if reloader != nil:
+        reloader.path = path
+        reloader.intervalMs = intervalMs
+        reloader.callback = callback
+        reloader.lastCheckMs = 0
+        reloader.lastMtime = 0
+        reloader.active = true
+    return reloader
+
+fn Poll(reloader: ConfigHotReloader) =
+    if reloader == nil or not reloader.active:
+        return
+    let nowMs = NowMs()
+    if reloader.intervalMs > 0 and nowMs - reloader.lastCheckMs < int64(reloader.intervalMs):
+        return
+    reloader.lastCheckMs = nowMs
+    if strings.len(reloader.path) == 0 or not os.fileExists(reloader.path):
+        return
+    let mtime = boot_os.fileMtime(reloader.path)
+    if mtime <= reloader.lastMtime:
+        return
+    let cfg = config_loader.LoadConfigFile(reloader.path)
+    if reloader.callback != nil:
+        reloader.callback(cfg)
+    reloader.lastMtime = mtime
+
+fn Deactivate(reloader: ConfigHotReloader) =
+    if reloader != nil:
+        reloader.active = false
+
+fn NewTelemetryCatalog(): TelemetryCatalog =
+    var catalog: TelemetryCatalog = new[TelemetryCatalog]()
+    if catalog != nil:
+        catalog.fields = @[]
+    return catalog
+
+fn RegisterField(catalog: TelemetryCatalog, field: obs_types.TelemetryField) =
+    if catalog == nil:
+        return
+    catalog.fields.add(field)
+
+fn Fields(catalog: TelemetryCatalog): seq[obs_types.TelemetryField] =
+    if catalog == nil:
+        return @[]
+    return catalog.fields
+
+fn EnsureDefaults(catalog: TelemetryCatalog) =
+    if catalog == nil:
+        return
+    let defaults = @[
+        obs_types.TelemetryField(name: "pebble.l0.sublevels",
+            description: "L0 sublevels", exportKey: "timeseries.pebble.l0.sublevels", required: true),
+        obs_types.TelemetryField(name: "pebble.memtable.size",
+            description: "memtable bytes", exportKey: "timeseries.pebble.mem.used", required: true),
+        obs_types.TelemetryField(name: "pebble.compaction.write_amp",
+            description: "compaction write amp", exportKey: "timeseries.pebble.compaction.write_amp", required: false),
+        obs_types.TelemetryField(name: "pebble.cache.hit_ratio",
+            description: "block cache hit ratio", exportKey: "timeseries.pebble.cache.hit_ratio", required: false)
+    ]
+    var i: int32 = 0
+    while i < defaults.len:
+        let candidate = defaults[i]
+        var exists: bool = false
+        var j: int32 = 0
+        while j < catalog.fields.len:
+            if catalog.fields[j].name == candidate.name:
+                exists = true
+                break
+            j = j + 1
+        if not exists:
+            catalog.fields.add(candidate)
+        i = i + 1
+
+fn NewDashboardLibrary(): DashboardLibrary =
+    var library: DashboardLibrary = new[DashboardLibrary]()
+    if library != nil:
+        library.templates = @[]
+    return library
+
+fn AddTemplate(library: DashboardLibrary, tpl: obs_types.DashboardTemplate) =
+    if library == nil:
+        return
+    library.templates.add(tpl)
+
+fn Templates(library: DashboardLibrary): seq[obs_types.DashboardTemplate] =
+    if library == nil:
+        return @[]
+    return library.templates
+
+fn DefaultDashboard(): obs_types.DashboardTemplate =
+    return obs_types.DashboardTemplate(
+        name: "Pebble Observability",
+        panels: @[
+            obs_types.DashboardPanel(
+                title: "Write Amplification",
+                promQuery: "pebble_compaction_write_amp",
+                unit: "ratio",
+                description: "Compaction write amplification"
+            ),
+            obs_types.DashboardPanel(
+                title: "MemTable Utilization",
+                promQuery: "pebble_memtable_utilization",
+                unit: "percent",
+                description: "MemTable fill ratio"
+            ),
+            obs_types.DashboardPanel(
+                title: "Events",
+                promQuery: "pebble_events_total",
+                unit: "count",
+                description: "Event counter by kind"
+            )
+        )
+    )
+
+fn NewOpsCenter(): OpsCenter =
+    var center: OpsCenter = new[OpsCenter]()
+    if center != nil:
+        center.reloaders = tables.TableInit[ConfigHotReloader](16)
+        center.registry = NewRuntimeCommandRegistry()
+        center.telemetry = NewTelemetryCatalog()
+        center.dashboards = NewDashboardLibrary()
+        EnsureDefaults(center.telemetry)
+        AddTemplate(center.dashboards, DefaultDashboard())
+    return center
+
+fn RegisterReloader(ops: OpsCenter, name: str, reloader: ConfigHotReloader) =
+    if ops == nil or reloader == nil or strings.len(name) == 0:
+        return
+    tables.TablePut[ConfigHotReloader](ops.reloaders, name, reloader)
+
+fn PollReloaders(ops: OpsCenter) =
+    if ops == nil:
+        return
+    var idx: int32 = 0
+    var key: str = ""
+    var entry: ConfigHotReloader = nil
+    while tables.TableNext[ConfigHotReloader](ops.reloaders, &idx, &key, &entry):
+        Poll(entry)
+
+fn RegisterRuntimeCommand(ops: OpsCenter, name: str, help: str,
+                          handler: obs_types.RuntimeCommand) =
+    if ops == nil:
+        return
+    RegisterCommand(ops.registry, name, help, handler)
+
+fn ExecuteRuntimeCommand(ops: OpsCenter, name: str, args: seq[str]): tuple[ok: bool, output: str] =
+    if ops == nil:
+        return (false, "ops center not initialized")
+    return ExecuteCommand(ops.registry, name, args)
+
+fn ListRuntimeCommands(ops: OpsCenter): seq[tuple[name: str, help: str]] =
+    if ops == nil:
+        return @[]
+    return ListCommands(ops.registry)

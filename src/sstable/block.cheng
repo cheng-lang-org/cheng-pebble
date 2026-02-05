@@ -1,0 +1,168 @@
+module pebble_sstable_block
+
+import "../core/types.cheng" as core_types
+import "../sstable/types.cheng" as sstable_types
+import "../sstable/encoding.cheng" as enc
+import cheng / stdlib / bootstrap / core / option as option
+import cheng / stdlib / bootstrap / strings as strings
+
+const
+    PrefixCompressedMagic = "\xffPC"
+
+type
+    BlockEntry =
+        key: core_types.Key
+        value: str
+
+type
+    BlockBuildResult =
+        payload: seq[uint8]
+        firstKey: core_types.Key
+        lastKey: core_types.Key
+        numEntries: int32
+        rawKeySize: int32
+        rawValueSize: int32
+        encoding: sstable_types.BlockEncoding
+
+type
+    BlockBuilder =
+        entries: seq[BlockEntry]
+        approxSize: int32
+        prefixCompression: bool
+
+type
+    BlockItem =
+        key: core_types.Key
+        value: str
+
+type
+    BlockIterator =
+        data: seq[uint8]
+        pos: int32
+        encoding: sstable_types.BlockEncoding
+        remaining: int32
+        lastKey: str
+
+fn InitBlockBuilder(prefixCompression: bool = false): BlockBuilder =
+    return BlockBuilder(entries: @[], approxSize: 0, prefixCompression: prefixCompression)
+
+fn decodeLegacy(it: var BlockIterator): option.Option[BlockItem] =
+    if it.pos >= it.data.len:
+        return option.none(BlockItem)
+    let keyBytes = enc.ReadBytes(it.data, &it.pos)
+    let valueBytes = enc.ReadBytes(it.data, &it.pos)
+    return option.some(BlockItem(key: core_types.ToKey(keyBytes), value: valueBytes))
+
+fn decodePrefixCompressed(it: var BlockIterator): option.Option[BlockItem] =
+    if it.remaining == 0:
+        return option.none(BlockItem)
+    it.remaining = it.remaining - 1
+    let shared = int32(enc.DecodeVarint(it.data, &it.pos))
+    if shared < 0 or shared > strings.len(it.lastKey):
+        raise newException(sstable_types.SSTError, "invalid shared prefix length")
+    let suffix = enc.ReadBytes(it.data, &it.pos)
+    let valueBytes = enc.ReadBytes(it.data, &it.pos)
+    let keyBytes = if shared == 0:
+        suffix
+    else:
+        it.lastKey[0..shared - 1] & suffix
+    it.lastKey = keyBytes
+    return option.some(BlockItem(key: core_types.ToKey(keyBytes), value: valueBytes))
+
+fn IsEmpty(builder: BlockBuilder): bool =
+    return builder.entries.len == 0
+
+fn EstimatedSize(builder: BlockBuilder): int32 =
+    return builder.approxSize + builder.entries.len * 5
+
+fn Add(builder: var BlockBuilder, key: core_types.Key, value: str) =
+    builder.entries.add(BlockEntry(key: key, value: value))
+    builder.approxSize = builder.approxSize + strings.len(core_types.ToBytes(key)) + strings.len(value)
+
+fn appendSeq(dst: var seq[uint8], src: seq[uint8]) =
+    var i: int32 = 0
+    while i < src.len:
+        dst.add(src[i])
+        i = i + 1
+
+fn encodePrefixCompressed(entries: seq[BlockEntry]): seq[uint8] =
+    var buffer: seq[uint8] = @[]
+    enc.AppendVarint(buffer, uint64(entries.len))
+    var lastKey: str = ""
+    var i: int32 = 0
+    while i < entries.len:
+        let entry = entries[i]
+        let keyBytes = core_types.ToBytes(entry.key)
+        let lastLen: int32 = strings.len(lastKey)
+        let keyLen: int32 = strings.len(keyBytes)
+        var shared: int32 = 0
+        while shared < lastLen and shared < keyLen and
+            strings.charAt(lastKey, shared) == strings.charAt(keyBytes, shared):
+            shared = shared + 1
+        enc.AppendVarint(buffer, uint64(shared))
+        let suffix = if shared >= keyLen: "" else: keyBytes[shared..keyLen - 1]
+        enc.AppendBytes(buffer, suffix)
+        enc.AppendBytes(buffer, entry.value)
+        lastKey = keyBytes
+        i = i + 1
+    var out: seq[uint8] = @[]
+    enc.AppendStrBytes(out, PrefixCompressedMagic)
+    appendSeq(out, buffer)
+    return out
+
+fn Finish(builder: var BlockBuilder): BlockBuildResult =
+    if builder.entries.len == 0:
+        raise newException(sstable_types.SSTError, "cannot finish empty block")
+    var result: BlockBuildResult
+    if builder.prefixCompression:
+        result.payload = encodePrefixCompressed(builder.entries)
+        result.encoding = sstable_types.BlockEncodingPrefixCompressed
+    else:
+        var buffer: seq[uint8] = @[]
+        var i: int32 = 0
+        while i < builder.entries.len:
+            let entry = builder.entries[i]
+            enc.AppendBytes(buffer, core_types.ToBytes(entry.key))
+            enc.AppendBytes(buffer, entry.value)
+            i = i + 1
+        result.payload = buffer
+        result.encoding = sstable_types.BlockEncodingLegacy
+    result.firstKey = builder.entries[0].key
+    result.lastKey = builder.entries[builder.entries.len - 1].key
+    result.numEntries = builder.entries.len
+    result.rawKeySize = 0
+    result.rawValueSize = 0
+    var j: int32 = 0
+    while j < builder.entries.len:
+        let entry = builder.entries[j]
+        result.rawKeySize = result.rawKeySize + strings.len(core_types.ToBytes(entry.key))
+        result.rawValueSize = result.rawValueSize + strings.len(entry.value)
+        j = j + 1
+    builder.entries.setLen(0)
+    builder.approxSize = 0
+    return result
+
+fn InitBlockIterator(data: seq[uint8]): BlockIterator =
+    let magicLen: int32 = strings.len(PrefixCompressedMagic)
+    if data.len >= magicLen:
+        var matched: bool = true
+        var i: int32 = 0
+        while i < magicLen:
+            let want = uint8(strings.charAt(PrefixCompressedMagic, i))
+            if data[i] != want:
+                matched = false
+                break
+            i = i + 1
+        if matched:
+            var pos: int32 = magicLen
+            let count = int32(enc.DecodeVarint(data, &pos))
+            return BlockIterator(data: data, pos: pos,
+                encoding: sstable_types.BlockEncodingPrefixCompressed,
+                remaining: count, lastKey: "")
+    return BlockIterator(data: data, pos: 0, encoding: sstable_types.BlockEncodingLegacy,
+        remaining: -1, lastKey: "")
+
+fn Next(it: var BlockIterator): option.Option[BlockItem] =
+    if it.encoding == sstable_types.BlockEncodingPrefixCompressed:
+        return decodePrefixCompressed(it)
+    return decodeLegacy(it)

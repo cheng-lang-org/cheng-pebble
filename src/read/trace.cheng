@@ -1,0 +1,222 @@
+module pebble_read_trace
+
+import "../core/types.cheng" as core_types
+import "../read/types.cheng" as read_types
+import "../read/iterators.cheng" as read_iter
+import cheng / stdlib / bootstrap / core / option as option
+import cheng / stdlib / bootstrap / strings as strings
+import cheng / stdlib / bootstrap / std / strutils as strutils
+
+
+type
+    TraceOpKind = enum
+        TraceOpFirst
+        TraceOpLast
+        TraceOpNext
+        TraceOpPrev
+        TraceOpSeekGE
+        TraceOpSeekLT
+        TraceOpSeekPrefixGE
+        TraceOpSetBounds
+        TraceOpClearBounds
+        TraceOpSetPrefix
+        TraceOpClearPrefix
+        TraceOpRange
+
+type
+    ReadTraceOp =
+        kind: TraceOpKind
+        key: option.Option[str]
+        prefix: option.Option[str]
+        lower: option.Option[str]
+        upper: option.Option[str]
+
+type
+    RangeTraceEntry =
+        key: str
+        value: str
+        sourcePriority: int32
+        sourceKind: read_types.ReadSourceKind
+
+type
+    ReadTraceState =
+        count: int32
+        valid: bool
+        key: option.Option[str]
+        value: option.Option[str]
+        sourcePriority: option.Option[int32]
+        sourceKind: option.Option[read_types.ReadSourceKind]
+
+type
+    ReadTraceStep =
+        op: TraceOpKind
+        ok: bool
+        state: ReadTraceState
+        rangeEntries: seq[RangeTraceEntry]
+
+type
+    ReadTrace =
+        initialState: ReadTraceState
+        steps: seq[ReadTraceStep]
+
+fn opName(kind: TraceOpKind): str =
+    if kind == TraceOpFirst:
+        return "first"
+    if kind == TraceOpLast:
+        return "last"
+    if kind == TraceOpNext:
+        return "next"
+    if kind == TraceOpPrev:
+        return "prev"
+    if kind == TraceOpSeekGE:
+        return "seekGE"
+    if kind == TraceOpSeekLT:
+        return "seekLT"
+    if kind == TraceOpSeekPrefixGE:
+        return "seekPrefixGE"
+    if kind == TraceOpSetBounds:
+        return "setBounds"
+    if kind == TraceOpClearBounds:
+        return "clearBounds"
+    if kind == TraceOpSetPrefix:
+        return "setPrefix"
+    if kind == TraceOpClearPrefix:
+        return "clearPrefix"
+    return "range"
+
+fn CaptureState(it: read_iter.ReadIterator): ReadTraceState =
+    var state = ReadTraceState(
+        count: read_iter.Count(it),
+        valid: read_iter.Valid(it),
+        key: option.none(str),
+        value: option.none(str),
+        sourcePriority: option.none(int32),
+        sourceKind: option.none(read_types.ReadSourceKind)
+    )
+    if state.valid:
+        let entry = read_iter.CurrentEntry(it)
+        state.key = option.some(core_types.ToBytes(entry.key))
+        state.value = option.some(entry.value)
+        state.sourcePriority = option.some(entry.sourcePriority)
+        state.sourceKind = option.some(entry.sourceKind)
+    return state
+
+fn ensureKey(op: ReadTraceOp): str =
+    if not option.IsSome(op.key):
+        raise newException(ValueError, opName(op.kind) & " requires key")
+    return option.Get(op.key)
+
+fn ensurePrefix(op: ReadTraceOp): str =
+    if not option.IsSome(op.prefix):
+        raise newException(ValueError, opName(op.kind) & " requires prefix")
+    return option.Get(op.prefix)
+
+fn toKeyOption(value: option.Option[str]): option.Option[core_types.Key] =
+    if option.IsSome(value):
+        return option.some(core_types.ToKey(option.Get(value)))
+    return option.none(core_types.Key)
+
+fn ApplyOp(it: read_iter.ReadIterator, op: ReadTraceOp): ReadTraceStep =
+    var ok: bool = true
+    var rangeEntries: seq[RangeTraceEntry] = @[]
+    if op.kind == TraceOpFirst:
+        ok = read_iter.First(it)
+    elif op.kind == TraceOpLast:
+        ok = read_iter.Last(it)
+    elif op.kind == TraceOpNext:
+        ok = read_iter.Next(it)
+    elif op.kind == TraceOpPrev:
+        ok = read_iter.Prev(it)
+    elif op.kind == TraceOpSeekGE:
+        ok = read_iter.SeekGE(it, core_types.ToKey(ensureKey(op)))
+    elif op.kind == TraceOpSeekLT:
+        ok = read_iter.SeekLT(it, core_types.ToKey(ensureKey(op)))
+    elif op.kind == TraceOpSeekPrefixGE:
+        let prefix = ensurePrefix(op)
+        ok = read_iter.SeekPrefixGE(it, prefix, core_types.ToKey(ensureKey(op)))
+    elif op.kind == TraceOpSetBounds:
+        read_iter.SetBounds(it, toKeyOption(op.lower), toKeyOption(op.upper))
+    elif op.kind == TraceOpClearBounds:
+        read_iter.ClearBounds(it)
+    elif op.kind == TraceOpSetPrefix:
+        read_iter.SetPrefix(it, op.prefix)
+    elif op.kind == TraceOpClearPrefix:
+        read_iter.ClearPrefix(it)
+    else:
+        let lower = toKeyOption(op.lower)
+        let upper = toKeyOption(op.upper)
+        let range = if option.IsSome(lower) or option.IsSome(upper):
+            read_types.NewReadRange(lower, upper)
+        else:
+            read_types.EmptyRange()
+        for entry in read_iter.Range(it, range, op.prefix):
+            rangeEntries.add(RangeTraceEntry(
+                key: core_types.ToBytes(entry.key),
+                value: entry.value,
+                sourcePriority: entry.sourcePriority,
+                sourceKind: entry.sourceKind
+            ))
+    return ReadTraceStep(
+        op: op.kind,
+        ok: ok,
+        state: CaptureState(it),
+        rangeEntries: rangeEntries
+    )
+
+fn NewTraceOp(kind: TraceOpKind,
+              key: option.Option[str] = option.none(str),
+              prefix: option.Option[str] = option.none(str),
+              lower: option.Option[str] = option.none(str),
+              upper: option.Option[str] = option.none(str)): ReadTraceOp =
+    return ReadTraceOp(kind: kind, key: key, prefix: prefix, lower: lower, upper: upper)
+
+fn TraceIterator(it: read_iter.ReadIterator,
+                 ops: seq[ReadTraceOp]): ReadTrace =
+    var trace = ReadTrace(initialState: CaptureState(it), steps: @[])
+    var i: int32 = 0
+    while i < ops.len:
+        trace.steps.add(ApplyOp(it, ops[i]))
+        i = i + 1
+    return trace
+
+fn formatState(state: ReadTraceState): str =
+    var parts: seq[str] = @[]
+    parts.add("count=" & strings.`$`(state.count))
+    parts.add("valid=" & strings.`$`(state.valid))
+    if option.IsSome(state.key):
+        parts.add("key=" & option.Get(state.key))
+    if option.IsSome(state.value):
+        parts.add("value=" & option.Get(state.value))
+    if option.IsSome(state.sourcePriority):
+        parts.add("priority=" & strings.`$`(option.Get(state.sourcePriority)))
+    if option.IsSome(state.sourceKind):
+        parts.add("source=" & strings.`$`(int32(option.Get(state.sourceKind))))
+    return strutils.join(parts, " ")
+
+fn TraceToLines(trace: ReadTrace): seq[str] =
+    var lines: seq[str] = @[]
+    lines.add("init " & formatState(trace.initialState))
+    var i: int32 = 0
+    while i < trace.steps.len:
+        let step = trace.steps[i]
+        var line = opName(step.op) & " ok=" & strings.`$`(step.ok) & " " & formatState(step.state)
+        if step.op == TraceOpRange:
+            line = line & " range=" & strings.`$`(step.rangeEntries.len)
+        lines.add(line)
+        i = i + 1
+    return lines
+
+fn DiffTraces(lhs: ReadTrace, rhs: ReadTrace): seq[str] =
+    let leftLines = TraceToLines(lhs)
+    let rightLines = TraceToLines(rhs)
+    var diffs: seq[str] = @[]
+    if leftLines.len != rightLines.len:
+        diffs.add("trace length differs: lhs=" & strings.`$`(leftLines.len) &
+            " rhs=" & strings.`$`(rightLines.len))
+    let limit = if leftLines.len < rightLines.len: leftLines.len else: rightLines.len
+    var i: int32 = 0
+    while i < limit:
+        if leftLines[i] != rightLines[i]:
+            diffs.add("step " & strings.`$`(i) & " lhs='" & leftLines[i] & "' rhs='" & rightLines[i] & "'")
+        i = i + 1
+    return diffs

@@ -1,0 +1,591 @@
+module pebble_manifest_store
+
+import "../core/types.cheng" as core_types
+import "../manifest/types.cheng" as man_types
+import "../manifest/version.cheng" as man_version
+import "../manifest/version_edit.cheng" as man_edit
+import cheng / stdlib / bootstrap / core / option as option
+import cheng / stdlib / bootstrap / system as sys
+import cheng / stdlib / bootstrap / strings as strings
+import cheng / stdlib / bootstrap / tables as tables
+import cheng / stdlib / bootstrap / std / os as os
+import cheng / stdlib / bootstrap / std / strutils as strutils
+
+@importc("cheng_fopen")
+fn c_fopen(filename, mode: cstring): os.File
+@importc("cheng_fclose")
+fn c_fclose(file: os.File): int32
+@importc("cheng_fwrite")
+fn c_fwrite(ptr: void*, size: int32, n: int32, stream: os.File): int32
+@importc("cheng_fflush")
+fn c_fflush(stream: os.File): int32
+@importc("fileno")
+fn c_fileno(stream: os.File): int32
+@importc("fsync")
+fn c_fsync(fd: int32): int32
+
+type
+    ManifestFormatVersion = enum
+        ManifestFormatV1 = 1
+        ManifestFormatV2 = 2
+
+type
+    ManifestRecordKind = enum
+        RecordSnapshot
+        RecordEdit
+
+type
+    ManifestRecord =
+        formatVersion: ManifestFormatVersion
+        kind: ManifestRecordKind
+        version: man_version.Version
+        edit: man_edit.VersionEdit
+
+type
+    ManifestStore = ref
+        path: str
+        formatVersion: ManifestFormatVersion
+
+fn InitManifestStore(path: str,
+                     formatVersion: ManifestFormatVersion = ManifestFormatV1): ManifestStore =
+    var store: ManifestStore = new[ManifestStore]()
+    if store != nil:
+        store.path = path
+        store.formatVersion = formatVersion
+    return store
+
+fn ensureStore(store: ManifestStore) =
+    if store == nil:
+        raise newException(man_types.ManifestError, "manifest store is nil")
+
+fn ensureParentDir(path: str) =
+    let parts = os.splitFile(path)
+    let parent = parts.dir
+    if strings.len(parent) > 0 and not os.dirExists(parent):
+        os.createDir(parent)
+
+fn strToBytes(text: str): seq[uint8] =
+    let n = strings.len(text)
+    var out = newSeq[uint8](n)
+    var i: int32 = 0
+    while i < n:
+        out[i] = uint8(sys.ord(strings.charAt(text, i)))
+        i = i + 1
+    return out
+
+fn writeBytes(file: os.File, data: seq[uint8]) =
+    if file == nil or data.len == 0:
+        return
+    var remaining: int32 = data.len
+    var offset: int32 = 0
+    while remaining > 0:
+        let ptr = ptr_add(data.buffer, offset)
+        let wrote = c_fwrite(ptr, 1, remaining, file)
+        if wrote <= 0:
+            raise newException(man_types.ManifestError, "manifest write failed")
+        offset = offset + wrote
+        remaining = remaining - wrote
+
+fn flushAndSync(file: os.File, path: str) =
+    if file == nil:
+        return
+    if c_fflush(file) != 0:
+        raise newException(man_types.ManifestError, "manifest flush failed: " & path)
+    let fd = c_fileno(file)
+    if fd < 0:
+        raise newException(man_types.ManifestError, "manifest fileno failed: " & path)
+    if c_fsync(fd) != 0:
+        raise newException(man_types.ManifestError, "manifest fsync failed: " & path)
+
+fn syncPath(path: str) =
+    if not os.fileExists(path):
+        return
+    var file = c_fopen(path, "rb")
+    if file == nil:
+        raise newException(man_types.ManifestError, "manifest open failed: " & path)
+    defer:
+        if file != nil:
+            discard c_fclose(file)
+    let fd = c_fileno(file)
+    if fd < 0:
+        raise newException(man_types.ManifestError, "manifest fileno failed: " & path)
+    if c_fsync(fd) != 0:
+        raise newException(man_types.ManifestError, "manifest fsync failed: " & path)
+
+fn appendSynced(path: str, data: str) =
+    ensureParentDir(path)
+    var file = c_fopen(path, "ab")
+    if file == nil:
+        raise newException(man_types.ManifestError, "manifest append open failed: " & path)
+    defer:
+        if file != nil:
+            discard c_fclose(file)
+    writeBytes(file, strToBytes(data))
+    flushAndSync(file, path)
+    if c_fclose(file) != 0:
+        raise newException(man_types.ManifestError, "manifest close failed: " & path)
+    file = nil
+
+fn writeSynced(path: str, data: str) =
+    ensureParentDir(path)
+    let tempPath = path & ".tmp"
+    var file = c_fopen(tempPath, "wb")
+    if file == nil:
+        raise newException(man_types.ManifestError, "manifest write open failed: " & tempPath)
+    defer:
+        if file != nil:
+            discard c_fclose(file)
+    writeBytes(file, strToBytes(data))
+    flushAndSync(file, tempPath)
+    if c_fclose(file) != 0:
+        raise newException(man_types.ManifestError, "manifest close failed: " & tempPath)
+    file = nil
+    if not os.fileExists(tempPath):
+        raise newException(man_types.ManifestError, "manifest temp snapshot missing: " & tempPath)
+    discard os.renameFile(tempPath, path)
+    if not os.fileExists(path):
+        raise newException(man_types.ManifestError, "manifest snapshot rename failed: " & path)
+    syncPath(path)
+
+fn uint64ToStr(value: uint64): str =
+    if value == uint64(0):
+        return "0"
+    var v: uint64 = value
+    var digits: seq[char] = @[]
+    while v > uint64(0):
+        let digit = int32(v mod uint64(10))
+        digits.add(sys.chr(48 + digit))
+        v = v div uint64(10)
+    var out: str = ""
+    var i: int32 = digits.len - 1
+    while true:
+        out = out + strings.charToStr(digits[i])
+        if i == 0:
+            break
+        i = i - 1
+    return out
+
+fn parseUint64Text(text: str): uint64 =
+    if text == nil:
+        return uint64(0)
+    var value: uint64 = 0
+    var i: int32 = 0
+    var hadDigit: bool = false
+    while i < strings.len(text):
+        let ch = strings.charAt(text, i)
+        if ch < '0' or ch > '9':
+            break
+        hadDigit = true
+        let digit = uint64(sys.ord(ch) - 48)
+        value = value * uint64(10) + digit
+        i = i + 1
+    if not hadDigit:
+        return uint64(0)
+    return value
+
+fn hexDigit(value: int32): char =
+    if value < 10:
+        return sys.chr(48 + value)
+    return sys.chr(87 + value)
+
+fn hexValue(c: char): int32 =
+    if c >= '0' and c <= '9':
+        return sys.ord(c) - 48
+    if c >= 'a' and c <= 'f':
+        return sys.ord(c) - 87
+    if c >= 'A' and c <= 'F':
+        return sys.ord(c) - 55
+    return -1
+
+fn encodeHex(text: str): str =
+    if text == nil or strings.len(text) == 0:
+        return ""
+    var out: str = ""
+    var i: int32 = 0
+    while i < strings.len(text):
+        let ch = strings.charAt(text, i)
+        let value = sys.ord(ch) and 0xFF
+        out = out + strings.charToStr(hexDigit(value div 16))
+        out = out + strings.charToStr(hexDigit(value mod 16))
+        i = i + 1
+    return out
+
+fn decodeHex(text: str): str =
+    if text == nil or strings.len(text) == 0:
+        return ""
+    if (strings.len(text) mod 2) != 0:
+        raise newException(man_types.ManifestError, "hex payload length invalid")
+    var out: str = ""
+    var i: int32 = 0
+    while i < strings.len(text):
+        let hi = hexValue(strings.charAt(text, i))
+        let lo = hexValue(strings.charAt(text, i + 1))
+        if hi < 0 or lo < 0:
+            raise newException(man_types.ManifestError, "invalid hex payload")
+        let byteVal = hi * 16 + lo
+        out = out + strings.charToStr(sys.chr(byteVal))
+        i = i + 2
+    return out
+
+fn joinSegments(segments: seq[str]): str =
+    if segments.len == 0:
+        return ""
+    var out: str = ""
+    var i: int32 = 0
+    while i < segments.len:
+        if i > 0:
+            out = out + ";"
+        out = out + segments[i]
+        i = i + 1
+    return out
+
+fn encodeFileMeta(level: man_types.Level, meta: man_types.FileMetadata): str =
+    return "L" & strings.`$`(level) & ":" &
+        strings.`$`(man_types.FileNumberToUint64(meta.fileNum)) & "," &
+        strings.`$`(meta.sizeBytes) & "," &
+        encodeHex(core_types.ToBytes(meta.smallest)) & "," &
+        encodeHex(core_types.ToBytes(meta.largest)) & "," &
+        strings.`$`(core_types.ToUint64(meta.smallestSeq)) & "," &
+        strings.`$`(core_types.ToUint64(meta.largestSeq))
+
+fn encodeLevels(entries: seq[man_version.LevelEntry]): str =
+    var segments: seq[str] = @[]
+    var i: int32 = 0
+    while i < entries.len:
+        let entry = entries[i]
+        var j: int32 = 0
+        while j < entry.files.len:
+            segments.add(encodeFileMeta(entry.level, entry.files[j]))
+            j = j + 1
+        i = i + 1
+    return joinSegments(segments)
+
+fn encodeAddedFiles(items: seq[man_edit.AddedFile]): str =
+    var segments: seq[str] = @[]
+    var i: int32 = 0
+    while i < items.len:
+        let item = items[i]
+        segments.add(encodeFileMeta(item.level, item.metadata))
+        i = i + 1
+    return joinSegments(segments)
+
+fn encodeDeletedFiles(items: seq[man_types.FileReference]): str =
+    var segments: seq[str] = @[]
+    var i: int32 = 0
+    while i < items.len:
+        let item = items[i]
+        let seg = "L" & strings.`$`(item.level) & ":" &
+            strings.`$`(man_types.FileNumberToUint64(item.fileNum))
+        segments.add(seg)
+        i = i + 1
+    return joinSegments(segments)
+
+fn parseFieldMap(parts: seq[str], start: int32): tables.Table[str] =
+    var fields = tables.TableInit[str](32)
+    var i: int32 = start
+    while i < parts.len:
+        let part = parts[i]
+        var eq: int32 = -1
+        var j: int32 = 0
+        while j < strings.len(part):
+            if strings.charAt(part, j) == '=':
+                eq = j
+                break
+            j = j + 1
+        if eq > 0:
+            let key = part[0..eq - 1]
+            let value = if eq + 1 < strings.len(part): part[eq + 1..strings.len(part) - 1] else: ""
+            tables.TablePut[str](fields, key, value)
+        i = i + 1
+    return fields
+
+fn fieldValue(fields: tables.Table[str], key: str): str =
+    if tables.TableHas[str](fields, key):
+        return tables.TableGet[str](fields, key)
+    return ""
+
+fn addLevelEntry(levels: var seq[man_version.LevelEntry], level: man_types.Level,
+                 meta: man_types.FileMetadata) =
+    var i: int32 = 0
+    while i < levels.len:
+        if levels[i].level == level:
+            levels[i].files.add(meta)
+            return
+        i = i + 1
+    levels.add(man_version.LevelEntry(level: level, files: @[meta]))
+
+fn parseLevelSegments(text: str): seq[man_version.LevelEntry] =
+    if text == nil or strings.len(text) == 0:
+        return @[]
+    let segments = strutils.split(text, ';')
+    var levels: seq[man_version.LevelEntry] = @[]
+    var i: int32 = 0
+    while i < segments.len:
+        let seg = strutils.strip(segments[i])
+        if strings.len(seg) == 0:
+            i = i + 1
+            continue
+        if not strutils.startsWith(seg, "L"):
+            raise newException(man_types.ManifestError, "invalid level segment: " & seg)
+        let parts = strutils.split(seg, ':')
+        if parts.len != 2:
+            raise newException(man_types.ManifestError, "invalid level segment: " & seg)
+        let levelStr = parts[0][1..strings.len(parts[0]) - 1]
+        let levelVal = int32(strutils.parseInt(levelStr))
+        let fields = strutils.split(parts[1], ',')
+        if fields.len < 6:
+            raise newException(man_types.ManifestError, "invalid file metadata segment: " & seg)
+        let fileNum = man_types.ToFileNumber(parseUint64Text(fields[0]))
+        let sizeBytes = parseUint64Text(fields[1])
+        let smallest = core_types.ToKey(decodeHex(fields[2]))
+        let largest = core_types.ToKey(decodeHex(fields[3]))
+        let smallestSeq = core_types.ToSequence(parseUint64Text(fields[4]))
+        let largestSeq = core_types.ToSequence(parseUint64Text(fields[5]))
+        var meta = man_types.FileMetadata(
+            fileNum: fileNum,
+            sizeBytes: sizeBytes,
+            smallest: smallest,
+            largest: largest,
+            smallestSeq: smallestSeq,
+            largestSeq: largestSeq
+        )
+        man_types.ValidateRange(meta)
+        addLevelEntry(levels, levelVal, meta)
+        i = i + 1
+    return levels
+
+fn parseAddedSegments(text: str): seq[man_edit.AddedFile] =
+    if text == nil or strings.len(text) == 0:
+        return @[]
+    let segments = strutils.split(text, ';')
+    var items: seq[man_edit.AddedFile] = @[]
+    var i: int32 = 0
+    while i < segments.len:
+        let seg = strutils.strip(segments[i])
+        if strings.len(seg) == 0:
+            i = i + 1
+            continue
+        if not strutils.startsWith(seg, "L"):
+            raise newException(man_types.ManifestError, "invalid add segment: " & seg)
+        let parts = strutils.split(seg, ':')
+        if parts.len != 2:
+            raise newException(man_types.ManifestError, "invalid add segment: " & seg)
+        let levelStr = parts[0][1..strings.len(parts[0]) - 1]
+        let levelVal = int32(strutils.parseInt(levelStr))
+        let fields = strutils.split(parts[1], ',')
+        if fields.len < 6:
+            raise newException(man_types.ManifestError, "invalid add metadata: " & seg)
+        let fileNum = man_types.ToFileNumber(parseUint64Text(fields[0]))
+        let sizeBytes = parseUint64Text(fields[1])
+        let smallest = core_types.ToKey(decodeHex(fields[2]))
+        let largest = core_types.ToKey(decodeHex(fields[3]))
+        let smallestSeq = core_types.ToSequence(parseUint64Text(fields[4]))
+        let largestSeq = core_types.ToSequence(parseUint64Text(fields[5]))
+        var meta = man_types.FileMetadata(
+            fileNum: fileNum,
+            sizeBytes: sizeBytes,
+            smallest: smallest,
+            largest: largest,
+            smallestSeq: smallestSeq,
+            largestSeq: largestSeq
+        )
+        man_types.ValidateRange(meta)
+        items.add(man_edit.AddedFile(level: levelVal, metadata: meta))
+        i = i + 1
+    return items
+
+fn parseDeletedSegments(text: str): seq[man_types.FileReference] =
+    if text == nil or strings.len(text) == 0:
+        return @[]
+    let segments = strutils.split(text, ';')
+    var out: seq[man_types.FileReference] = @[]
+    var i: int32 = 0
+    while i < segments.len:
+        let seg = strutils.strip(segments[i])
+        if strings.len(seg) == 0:
+            i = i + 1
+            continue
+        if not strutils.startsWith(seg, "L"):
+            raise newException(man_types.ManifestError, "invalid delete segment: " & seg)
+        let parts = strutils.split(seg, ':')
+        if parts.len != 2:
+            raise newException(man_types.ManifestError, "invalid delete segment: " & seg)
+        let levelStr = parts[0][1..strings.len(parts[0]) - 1]
+        let levelVal = int32(strutils.parseInt(levelStr))
+        let fileNum = man_types.ToFileNumber(parseUint64Text(parts[1]))
+        out.add(man_types.FileReference(level: levelVal, fileNum: fileNum))
+        i = i + 1
+    return out
+
+fn recordToLine(record: ManifestRecord): str =
+    let formatStr = "v=" & strings.`$`(int32(record.formatVersion))
+    if record.kind == RecordSnapshot:
+        let version = record.version
+        let levelsText = encodeLevels(man_version.LevelEntries(version))
+        return formatStr & "|snapshot" &
+            "|id=" & uint64ToStr(man_types.ToUint64(version.id)) &
+            "|log=" & uint64ToStr(version.logNumber) &
+            "|prev=" & uint64ToStr(version.prevLogNumber) &
+            "|next=" & uint64ToStr(version.nextFileNumber) &
+            "|lastSeq=" & uint64ToStr(core_types.ToUint64(version.lastSeqNum)) &
+            "|cmp=" & encodeHex(version.comparatorName) &
+            "|levels=" & levelsText
+    let edit = record.edit
+    var line = formatStr & "|edit"
+    if option.IsSome(edit.logNumber):
+        line = line & "|log=" & uint64ToStr(option.Get(edit.logNumber))
+    if option.IsSome(edit.prevLogNumber):
+        line = line & "|prev=" & uint64ToStr(option.Get(edit.prevLogNumber))
+    if option.IsSome(edit.nextFileNumber):
+        line = line & "|next=" & uint64ToStr(option.Get(edit.nextFileNumber))
+    if option.IsSome(edit.lastSeqNum):
+        line = line & "|lastSeq=" & uint64ToStr(core_types.ToUint64(option.Get(edit.lastSeqNum)))
+    if option.IsSome(edit.comparatorName):
+        line = line & "|cmp=" & encodeHex(option.Get(edit.comparatorName))
+    if edit.deletedFiles.len > 0:
+        line = line & "|del=" & encodeDeletedFiles(edit.deletedFiles)
+    if edit.addedFiles.len > 0:
+        line = line & "|add=" & encodeAddedFiles(edit.addedFiles)
+    return line
+
+fn recordFromLine(line: str): ManifestRecord =
+    let parts = strutils.split(line, '|')
+    if parts.len == 0:
+        raise newException(man_types.ManifestError, "empty manifest record")
+    var idx: int32 = 0
+    var format = ManifestFormatV1
+    if strutils.startsWith(parts[0], "v="):
+        let value = parts[0][2..strings.len(parts[0]) - 1]
+        let parsed = int32(strutils.parseInt(value))
+        format = ManifestFormatVersion(parsed)
+        idx = 1
+    if idx >= parts.len:
+        raise newException(man_types.ManifestError, "manifest record missing kind")
+    let kind = parts[idx]
+    let fields = parseFieldMap(parts, idx + 1)
+    if kind == "snapshot":
+        var version = man_version.InitVersion()
+        let idStr = fieldValue(fields, "id")
+        if strings.len(idStr) > 0:
+            version.id = man_types.ToVersionId(parseUint64Text(idStr))
+        let logStr = fieldValue(fields, "log")
+        if strings.len(logStr) > 0:
+            version.logNumber = parseUint64Text(logStr)
+        let prevStr = fieldValue(fields, "prev")
+        if strings.len(prevStr) > 0:
+            version.prevLogNumber = parseUint64Text(prevStr)
+        let nextStr = fieldValue(fields, "next")
+        if strings.len(nextStr) > 0:
+            version.nextFileNumber = parseUint64Text(nextStr)
+        let lastSeqStr = fieldValue(fields, "lastSeq")
+        if strings.len(lastSeqStr) > 0:
+            version.lastSeqNum = core_types.ToSequence(parseUint64Text(lastSeqStr))
+        let cmpStr = fieldValue(fields, "cmp")
+        if strings.len(cmpStr) > 0:
+            version.comparatorName = decodeHex(cmpStr)
+        let levelsText = fieldValue(fields, "levels")
+        version.levels = parseLevelSegments(levelsText)
+        return ManifestRecord(formatVersion: format,
+                              kind: RecordSnapshot,
+                              version: version,
+                              edit: man_edit.InitVersionEdit())
+    if kind == "edit":
+        var edit = man_edit.InitVersionEdit()
+        let logStr = fieldValue(fields, "log")
+        if strings.len(logStr) > 0:
+            man_edit.SetLogNumber(edit, parseUint64Text(logStr))
+        let prevStr = fieldValue(fields, "prev")
+        if strings.len(prevStr) > 0:
+            man_edit.SetPrevLogNumber(edit, parseUint64Text(prevStr))
+        let nextStr = fieldValue(fields, "next")
+        if strings.len(nextStr) > 0:
+            man_edit.SetNextFileNumber(edit, parseUint64Text(nextStr))
+        let lastSeqStr = fieldValue(fields, "lastSeq")
+        if strings.len(lastSeqStr) > 0:
+            man_edit.SetLastSequence(edit, core_types.ToSequence(parseUint64Text(lastSeqStr)))
+        let cmpStr = fieldValue(fields, "cmp")
+        if strings.len(cmpStr) > 0:
+            man_edit.SetComparatorName(edit, decodeHex(cmpStr))
+        let delStr = fieldValue(fields, "del")
+        if strings.len(delStr) > 0:
+            let delItems = parseDeletedSegments(delStr)
+            var i: int32 = 0
+            while i < delItems.len:
+                let item = delItems[i]
+                man_edit.DeleteFile(edit, item.level, item.fileNum)
+                i = i + 1
+        let addStr = fieldValue(fields, "add")
+        if strings.len(addStr) > 0:
+            let addItems = parseAddedSegments(addStr)
+            var j: int32 = 0
+            while j < addItems.len:
+                let item = addItems[j]
+                man_edit.AddFile(edit, item.level, item.metadata)
+                j = j + 1
+        return ManifestRecord(formatVersion: format,
+                              kind: RecordEdit,
+                              version: nil,
+                              edit: edit)
+    raise newException(man_types.ManifestError, "unknown manifest record kind: " & kind)
+
+fn appendRecord(path: str, record: ManifestRecord) =
+    let data = recordToLine(record) & "\n"
+    appendSynced(path, data)
+
+fn overwriteWithSnapshot(path: str, version: man_version.Version,
+                         formatVersion: ManifestFormatVersion) =
+    let record = ManifestRecord(formatVersion: formatVersion,
+                                kind: RecordSnapshot,
+                                version: man_version.Clone(version),
+                                edit: man_edit.InitVersionEdit())
+    let content = recordToLine(record) & "\n"
+    writeSynced(path, content)
+
+fn ManifestExists(store: ManifestStore): bool =
+    ensureStore(store)
+    return os.fileExists(store.path)
+
+fn AppendEdit(store: ManifestStore, edit: man_edit.VersionEdit) =
+    ensureStore(store)
+    appendRecord(store.path, ManifestRecord(formatVersion: store.formatVersion,
+                                           kind: RecordEdit,
+                                           version: nil,
+                                           edit: edit))
+
+fn WriteSnapshot(store: ManifestStore, version: man_version.Version) =
+    ensureStore(store)
+    overwriteWithSnapshot(store.path, version, store.formatVersion)
+
+fn ReadAllRecords(store: ManifestStore): seq[ManifestRecord] =
+    ensureStore(store)
+    var detectedVersion = ManifestFormatV1
+    var seenVersion = false
+    if not ManifestExists(store):
+        return @[]
+    let content = os.readFile(store.path)
+    let lines = strutils.split(content, '\n')
+    var out: seq[ManifestRecord] = @[]
+    var i: int32 = 0
+    while i < lines.len:
+        let line = strutils.strip(lines[i])
+        if strings.len(line) == 0:
+            i = i + 1
+            continue
+        let record = recordFromLine(line)
+        out.add(record)
+        if not seenVersion:
+            detectedVersion = record.formatVersion
+            seenVersion = true
+        elif record.formatVersion != detectedVersion:
+            raise newException(man_types.ManifestError, "manifest contains mixed format versions")
+        i = i + 1
+    store.formatVersion = detectedVersion
+    return out
+
+fn Sync(store: ManifestStore) =
+    if store == nil:
+        return
+    syncPath(store.path)
+
+fn Close(store: ManifestStore) =
+    Sync(store)

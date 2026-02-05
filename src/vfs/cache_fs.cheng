@@ -1,0 +1,423 @@
+module pebble_vfs_cache_fs
+
+import "../vfs/types.cheng" as vtypes
+import cheng / stdlib / bootstrap / system as sys
+import cheng / stdlib / bootstrap / strings as strings
+import cheng / stdlib / bootstrap / std / monotimes as monotimes
+
+type
+    CacheEntry = ref
+        data: seq[uint8]
+        info: vtypes.FileInfo
+        path: str
+        lastAccess: monotimes.MonoTime
+
+type
+    ReadCache = ref
+        entries: seq[CacheEntry]
+        order: seq[str]
+        capacityBytes: int64
+        maxEntries: int32
+        currentBytes: int64
+
+type
+    CachedReadFileState = ref
+        cache: ReadCache
+        entry: CacheEntry
+        offset: int32
+
+type
+    CachingFileSystemState = ref
+        base: vtypes.FileSystem
+        cache: ReadCache
+        maxCachedFileSize: int64
+
+fn minInt32(a: int32, b: int32): int32 =
+    return if a < b: a else: b
+
+fn maxInt64(a: int64, b: int64): int64 =
+    return if a > b: a else: b
+
+fn startsWith(text: str, prefix: str): bool =
+    if prefix == nil or strings.len(prefix) == 0:
+        return true
+    if text == nil:
+        return false
+    let n: int32 = strings.len(text)
+    let m: int32 = strings.len(prefix)
+    if n < m:
+        return false
+    var i: int32 = 0
+    while i < m:
+        if strings.charAt(text, i) != strings.charAt(prefix, i):
+            return false
+        i = i + 1
+    return true
+
+fn findEntryIndex(cache: ReadCache, path: str): int32 =
+    if cache == nil or path == nil:
+        return -1
+    var i: int32 = 0
+    while i < cache.entries.len:
+        let entry = cache.entries[i]
+        if entry != nil and entry.path == path:
+            return i
+        i = i + 1
+    return -1
+
+fn findOrderIndex(cache: ReadCache, path: str): int32 =
+    if cache == nil or path == nil:
+        return -1
+    var i: int32 = 0
+    while i < cache.order.len:
+        if cache.order[i] == path:
+            return i
+        i = i + 1
+    return -1
+
+fn removeEntryAt(entries: var seq[CacheEntry], idx: int32) =
+    if idx < 0 or idx >= entries.len:
+        return
+    let last: int32 = entries.len - 1
+    var i: int32 = idx
+    while i < last:
+        entries[i] = entries[i + 1]
+        i = i + 1
+    entries.setLen(last)
+
+fn removeOrderAt(order: var seq[str], idx: int32) =
+    if idx < 0 or idx >= order.len:
+        return
+    let last: int32 = order.len - 1
+    var i: int32 = idx
+    while i < last:
+        order[i] = order[i + 1]
+        i = i + 1
+    order.setLen(last)
+
+fn touchOrder(cache: ReadCache, path: str) =
+    let idx = findOrderIndex(cache, path)
+    if idx >= 0:
+        removeOrderAt(cache.order, idx)
+    cache.order.add(path)
+
+fn evictIfNeeded(cache: ReadCache) =
+    if cache == nil:
+        return
+    while (cache.currentBytes > cache.capacityBytes or cache.entries.len > cache.maxEntries) and
+          cache.order.len > 0:
+        let key = cache.order[0]
+        let idx = findEntryIndex(cache, key)
+        if idx >= 0:
+            let entry = cache.entries[idx]
+            if entry != nil:
+                cache.currentBytes = cache.currentBytes - int64(entry.data.len)
+            removeEntryAt(cache.entries, idx)
+        removeOrderAt(cache.order, 0)
+
+fn NewReadCache(capacityBytes: int64, maxEntries: int32 = 256): ReadCache =
+    if capacityBytes <= 0:
+        raise newException(ValueError, "capacityBytes must be > 0")
+    if maxEntries <= 0:
+        raise newException(ValueError, "maxEntries must be > 0")
+    return ReadCache(
+        entries: @[],
+        order: @[],
+        capacityBytes: capacityBytes,
+        maxEntries: maxEntries,
+        currentBytes: 0
+    )
+
+fn Get(cache: ReadCache, path: str): CacheEntry =
+    if cache == nil or path == nil:
+        return nil
+    let idx = findEntryIndex(cache, path)
+    if idx < 0:
+        return nil
+    let entry = cache.entries[idx]
+    if entry != nil:
+        entry.lastAccess = monotimes.getMonoTime()
+        touchOrder(cache, path)
+    return entry
+
+fn Store(cache: ReadCache, entry: CacheEntry) =
+    if cache == nil or entry == nil:
+        return
+    let idx = findEntryIndex(cache, entry.path)
+    if idx >= 0:
+        let existing = cache.entries[idx]
+        if existing != nil:
+            cache.currentBytes = cache.currentBytes - int64(existing.data.len)
+        removeEntryAt(cache.entries, idx)
+    let orderIdx = findOrderIndex(cache, entry.path)
+    if orderIdx >= 0:
+        removeOrderAt(cache.order, orderIdx)
+    cache.entries.add(entry)
+    cache.order.add(entry.path)
+    cache.currentBytes = cache.currentBytes + int64(entry.data.len)
+    evictIfNeeded(cache)
+
+fn Invalidate(cache: ReadCache, path: str) =
+    if cache == nil or path == nil:
+        return
+    let idx = findEntryIndex(cache, path)
+    if idx >= 0:
+        let entry = cache.entries[idx]
+        if entry != nil:
+            cache.currentBytes = cache.currentBytes - int64(entry.data.len)
+        removeEntryAt(cache.entries, idx)
+    let orderIdx = findOrderIndex(cache, path)
+    if orderIdx >= 0:
+        removeOrderAt(cache.order, orderIdx)
+
+fn InvalidatePrefix(cache: ReadCache, prefix: str) =
+    if cache == nil or prefix == nil or strings.len(prefix) == 0:
+        return
+    var i: int32 = cache.entries.len - 1
+    while i >= 0:
+        let entry = cache.entries[i]
+        if entry != nil and startsWith(entry.path, prefix):
+            cache.currentBytes = cache.currentBytes - int64(entry.data.len)
+            removeEntryAt(cache.entries, i)
+        i = i - 1
+    i = cache.order.len - 1
+    while i >= 0:
+        if startsWith(cache.order[i], prefix):
+            removeOrderAt(cache.order, i)
+        i = i - 1
+
+fn NewCachedReadFile(cache: ReadCache, entry: CacheEntry): vtypes.File =
+    if entry == nil:
+        return nil
+    let state = CachedReadFileState(cache: cache, entry: entry, offset: 0)
+    var file: vtypes.File = new[vtypes.File]()
+    file.closeFn = fn (self: vtypes.File) =
+        discard self
+        state.cache = nil
+        state.entry = nil
+    file.readFn = fn (self: vtypes.File, dest: void*, size: int32): int32 =
+        discard self
+        if state.entry == nil or size <= 0:
+            return 0
+        let available: int32 = state.entry.data.len - state.offset
+        if available <= 0:
+            return 0
+        let toCopy = minInt32(size, available)
+        let src = sys.ptr_add(state.entry.data.buffer, state.offset)
+        sys.copyMem(dest, src, toCopy)
+        state.offset = state.offset + toCopy
+        if state.cache != nil:
+            state.entry.lastAccess = monotimes.getMonoTime()
+        return toCopy
+    file.readAtFn = fn (self: vtypes.File, dest: void*, size: int32, offset: int64): int32 =
+        discard self
+        if state.entry == nil or size <= 0:
+            return 0
+        let off: int64 = offset
+        if off < 0 or off >= int64(state.entry.data.len):
+            return 0
+        let available: int32 = int32(int64(state.entry.data.len) - off)
+        let toCopy = minInt32(size, available)
+        let src = sys.ptr_add(state.entry.data.buffer, int32(off))
+        sys.copyMem(dest, src, toCopy)
+        if state.cache != nil:
+            state.entry.lastAccess = monotimes.getMonoTime()
+        return toCopy
+    file.writeFn = fn (self: vtypes.File, src: void*, size: int32): int32 =
+        discard self
+        discard src
+        discard size
+        raise newException(vtypes.VfsError, "cached file is read-only")
+    file.writeAtFn = fn (self: vtypes.File, src: void*, size: int32, offset: int64): int32 =
+        discard self
+        discard src
+        discard size
+        discard offset
+        raise newException(vtypes.VfsError, "cached file is read-only")
+    file.preallocateFn = fn (self: vtypes.File, offset: int64, length: int64) =
+        discard self
+        discard offset
+        discard length
+        raise newException(vtypes.VfsError, "cached file does not support preallocate")
+    file.statFn = fn (self: vtypes.File): vtypes.FileInfo =
+        discard self
+        if state.entry == nil:
+            raise newException(vtypes.VfsError, "cache entry released")
+        return state.entry.info
+    file.syncFn = fn (self: vtypes.File) =
+        discard self
+        return
+    file.syncDataFn = fn (self: vtypes.File) =
+        discard self
+        return
+    file.syncToFn = fn (self: vtypes.File, length: int64): bool =
+        discard self
+        discard length
+        return true
+    file.prefetchFn = fn (self: vtypes.File, offset: int64, length: int64) =
+        discard self
+        discard offset
+        discard length
+    file.fdFn = fn (self: vtypes.File): uint64 =
+        discard self
+        return vtypes.InvalidFileDescriptor
+    file.mapFn = fn (self: vtypes.File, offset: int64, length: int32,
+                     access: vtypes.MmapAccess): vtypes.MmapRegion =
+        discard self
+        if state.entry == nil:
+            raise newException(vtypes.VfsError, "cache entry released")
+        if access == vtypes.MapReadWrite:
+            raise newException(vtypes.VfsError, "cache map is read-only")
+        let off: int64 = offset
+        if off < 0 or off >= int64(state.entry.data.len):
+            raise newException(vtypes.VfsError, "map out of range")
+        let maxLen: int32 = int32(int64(state.entry.data.len) - off)
+        let mapped = if length <= 0 or length > maxLen: maxLen else: length
+        let base = sys.ptr_add(state.entry.data.buffer, int32(off))
+        return vtypes.MmapRegion(base: base, length: mapped, access: vtypes.MapReadOnly)
+    return file
+
+fn cacheFile(state: CachingFileSystemState, path: str, opts: seq[vtypes.OpenOption]): vtypes.File =
+    let source = vtypes.Open(state.base, path, opts)
+    if source == nil:
+        return nil
+    let info = vtypes.Stat(source)
+    if info.isDir:
+        return source
+    if info.size < 0 or int64(info.size) > state.maxCachedFileSize:
+        return source
+    var data = newSeq[uint8](int32(info.size))
+    var offset: int32 = 0
+    while offset < data.len:
+        let dst = sys.ptr_add(data.buffer, offset)
+        let got = vtypes.Read(source, dst, data.len - offset)
+        if got <= 0:
+            break
+        offset = offset + got
+    if offset != data.len:
+        vtypes.Close(source)
+        return vtypes.Open(state.base, path, opts)
+    let entry = CacheEntry(
+        data: data,
+        info: info,
+        path: path,
+        lastAccess: monotimes.getMonoTime()
+    )
+    Store(state.cache, entry)
+    vtypes.Close(source)
+    return NewCachedReadFile(state.cache, entry)
+
+fn invalidatePath(state: CachingFileSystemState, path: str) =
+    if state == nil or path == nil or strings.len(path) == 0:
+        return
+    Invalidate(state.cache, path)
+
+fn invalidateTree(state: CachingFileSystemState, path: str) =
+    if state == nil or path == nil or strings.len(path) == 0:
+        return
+    let prefix = path & "/"
+    InvalidatePrefix(state.cache, prefix)
+    Invalidate(state.cache, path)
+
+fn NewCachingFileSystem(base: vtypes.FileSystem, capacityBytes: int64,
+                        maxEntries: int32 = 256,
+                        maxCachedFileSize: int64 = -1): vtypes.FileSystem =
+    if base == nil:
+        raise newException(ValueError, "base FileSystem must not be nil")
+    let cache = NewReadCache(capacityBytes, maxEntries)
+    let limit = if maxCachedFileSize <= 0:
+        maxInt64(capacityBytes div 4, 128 * 1024)
+    else:
+        maxCachedFileSize
+    return NewCachingFileSystemWithCache(base, cache, limit)
+
+fn NewCachingFileSystemWithCache(base: vtypes.FileSystem, cache: ReadCache,
+                                 maxCachedFileSize: int64 = -1): vtypes.FileSystem =
+    if base == nil:
+        raise newException(ValueError, "base FileSystem must not be nil")
+    if cache == nil:
+        raise newException(ValueError, "cache must not be nil")
+    let limit = if maxCachedFileSize <= 0:
+        maxInt64(cache.capacityBytes div 4, 128 * 1024)
+    else:
+        maxCachedFileSize
+    let state = CachingFileSystemState(base: base, cache: cache, maxCachedFileSize: limit)
+    var fs: vtypes.FileSystem = new[vtypes.FileSystem]()
+    fs.createFn = fn (self: vtypes.FileSystem, path: str,
+                      category: vtypes.DiskWriteCategory): vtypes.File =
+        discard self
+        invalidatePath(state, path)
+        return vtypes.Create(state.base, path, category)
+    fs.linkFn = fn (self: vtypes.FileSystem, oldname: str, newname: str) =
+        discard self
+        vtypes.Link(state.base, oldname, newname)
+        invalidatePath(state, newname)
+    fs.openFn = fn (self: vtypes.FileSystem, path: str, opts: seq[vtypes.OpenOption]): vtypes.File =
+        discard self
+        let cached = Get(state.cache, path)
+        if cached != nil:
+            return NewCachedReadFile(state.cache, cached)
+        let file = cacheFile(state, path, opts)
+        if file != nil:
+            return file
+        return vtypes.Open(state.base, path, opts)
+    fs.openReadWriteFn = fn (self: vtypes.FileSystem, path: str,
+                             category: vtypes.DiskWriteCategory,
+                             opts: seq[vtypes.OpenOption]): vtypes.File =
+        discard self
+        invalidatePath(state, path)
+        return vtypes.OpenReadWrite(state.base, path, category, opts)
+    fs.openDirFn = fn (self: vtypes.FileSystem, path: str): vtypes.File =
+        discard self
+        return vtypes.OpenDir(state.base, path)
+    fs.removeFn = fn (self: vtypes.FileSystem, path: str) =
+        discard self
+        invalidatePath(state, path)
+        vtypes.Remove(state.base, path)
+    fs.removeAllFn = fn (self: vtypes.FileSystem, path: str) =
+        discard self
+        invalidateTree(state, path)
+        vtypes.RemoveAll(state.base, path)
+    fs.renameFn = fn (self: vtypes.FileSystem, oldname: str, newname: str) =
+        discard self
+        invalidatePath(state, oldname)
+        invalidatePath(state, newname)
+        vtypes.Rename(state.base, oldname, newname)
+    fs.reuseForWriteFn = fn (self: vtypes.FileSystem, oldname: str, newname: str,
+                             category: vtypes.DiskWriteCategory): vtypes.File =
+        discard self
+        invalidatePath(state, oldname)
+        invalidatePath(state, newname)
+        return vtypes.ReuseForWrite(state.base, oldname, newname, category)
+    fs.mkdirAllFn = fn (self: vtypes.FileSystem, path: str, perm: uint32) =
+        discard self
+        invalidateTree(state, path)
+        vtypes.MkdirAll(state.base, path, perm)
+    fs.lockFn = fn (self: vtypes.FileSystem, path: str): vtypes.File =
+        discard self
+        return vtypes.Lock(state.base, path)
+    fs.listFn = fn (self: vtypes.FileSystem, path: str): seq[str] =
+        discard self
+        return vtypes.List(state.base, path)
+    fs.statFn = fn (self: vtypes.FileSystem, path: str): vtypes.FileInfo =
+        discard self
+        let cached = Get(state.cache, path)
+        if cached != nil:
+            return cached.info
+        return vtypes.StatPath(state.base, path)
+    fs.pathBaseFn = fn (self: vtypes.FileSystem, path: str): str =
+        discard self
+        return vtypes.PathBase(state.base, path)
+    fs.pathJoinFn = fn (self: vtypes.FileSystem, parts: seq[str]): str =
+        discard self
+        return vtypes.PathJoin(state.base, parts)
+    fs.pathDirFn = fn (self: vtypes.FileSystem, path: str): str =
+        discard self
+        return vtypes.PathDir(state.base, path)
+    fs.diskUsageFn = fn (self: vtypes.FileSystem, path: str): vtypes.DiskUsage =
+        discard self
+        return vtypes.DiskUsage(state.base, path)
+    fs.unwrapFn = fn (self: vtypes.FileSystem): vtypes.FileSystem =
+        discard self
+        return state.base
+    return fs

@@ -1,0 +1,99 @@
+module pebble_sstable_types
+
+import "../core/types.cheng" as core_types
+import cheng / stdlib / bootstrap / core / option as option
+import cheng / stdlib / bootstrap / strings as strings
+
+type
+    SSTError =
+        of CatchableError
+
+type
+    BlockHandle =
+        offset: int32
+        length: int32
+
+type
+    BlockKind = enum
+        BlockData
+        BlockIndex
+        BlockFilter
+        BlockMeta
+
+type
+    BlockEncoding = enum
+        BlockEncodingLegacy
+        BlockEncodingPrefixCompressed
+
+type
+    TableProperties =
+        numEntries: int32
+        rawKeySize: int32
+        rawValueSize: int32
+        smallestKey: option.Option[core_types.Key]
+        largestKey: option.Option[core_types.Key]
+        bloomBitsPerKey: option.Option[int32]
+
+type
+    IndexEntry =
+        separator: core_types.Key
+        handle: BlockHandle
+
+type
+    TableSection =
+        kind: BlockKind
+        handle: BlockHandle
+
+type
+    SSTableImage =
+        buffer: seq[uint8]
+        sections: seq[TableSection]
+
+type
+    TableFooter =
+        indexHandle: BlockHandle
+        filterHandle: option.Option[BlockHandle]
+        metaHandle: BlockHandle
+
+type
+    BloomFilter =
+        bits: seq[uint8]
+        numBits: int32
+        numProbes: int32
+
+type
+    TableBuildArtifacts =
+        image: SSTableImage
+        footer: TableFooter
+        properties: TableProperties
+        bloom: option.Option[BloomFilter]
+        indexEntries: seq[IndexEntry]
+
+fn InitBlockHandle(offset: int32, length: int32): BlockHandle =
+    return BlockHandle(offset: offset, length: length)
+
+fn Describe(handle: BlockHandle): str =
+    return "offset=" & strings.`$`(handle.offset) & ",length=" & strings.`$`(handle.length)
+
+fn MergeProperties(into: var TableProperties, other: TableProperties) =
+    into.numEntries = into.numEntries + other.numEntries
+    into.rawKeySize = into.rawKeySize + other.rawKeySize
+    into.rawValueSize = into.rawValueSize + other.rawValueSize
+    if option.IsSome(other.smallestKey):
+        if not option.IsSome(into.smallestKey):
+            into.smallestKey = other.smallestKey
+        else:
+            let currentKey = option.Get(into.smallestKey)
+            let otherKey = option.Get(other.smallestKey)
+            if core_types.CompareBytewise(currentKey, otherKey) > 0:
+                into.smallestKey = other.smallestKey
+    if option.IsSome(other.largestKey):
+        if not option.IsSome(into.largestKey):
+            into.largestKey = other.largestKey
+        else:
+            let currentKey = option.Get(into.largestKey)
+            let otherKey = option.Get(other.largestKey)
+            if core_types.CompareBytewise(currentKey, otherKey) < 0:
+                into.largestKey = other.largestKey
+    if option.IsSome(other.bloomBitsPerKey):
+        into.bloomBitsPerKey = other.bloomBitsPerKey

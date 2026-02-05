@@ -1,0 +1,270 @@
+module pebble_vfs_types
+
+import cheng / stdlib / bootstrap / std / times as times
+
+type
+    VfsError =
+        of CatchableError
+
+type
+    DiskWriteCategory = str
+
+const
+    WriteCategoryUnspecified: DiskWriteCategory = "unspecified"
+    InvalidFileDescriptor: uint64 = 0xFFFFFFFFFFFFFFFF
+
+fn DiskCategory(value: str): DiskWriteCategory =
+    return value
+
+fn DiskCategoryToString(category: DiskWriteCategory): str =
+    return category
+
+type
+    FileInfo =
+        size: int64
+        isDir: bool
+        permissions: uint32
+        modTime: times.Time
+
+type
+    MmapAccess = enum
+        MapReadOnly
+        MapReadWrite
+
+type
+    ReleaseHook = fn (base: void*, length: int32)
+
+type
+    MmapRegion =
+        base: void*
+        length: int32
+        access: MmapAccess
+        releaser: ReleaseHook
+
+type
+    DiskUsage =
+        availBytes: uint64
+        totalBytes: uint64
+        usedBytes: uint64
+
+type
+    File = ref
+        closeFn: fn (self: File)
+        readFn: fn (self: File, dest: void*, size: int32): int32
+        readAtFn: fn (self: File, dest: void*, size: int32, offset: int64): int32
+        writeFn: fn (self: File, src: void*, size: int32): int32
+        writeAtFn: fn (self: File, src: void*, size: int32, offset: int64): int32
+        preallocateFn: fn (self: File, offset: int64, length: int64)
+        statFn: fn (self: File): FileInfo
+        syncFn: fn (self: File)
+        syncDataFn: fn (self: File)
+        syncToFn: fn (self: File, length: int64): bool
+        prefetchFn: fn (self: File, offset: int64, length: int64)
+        fdFn: fn (self: File): uint64
+        mapFn: fn (self: File, offset: int64, length: int32, access: MmapAccess): MmapRegion
+
+type
+    OpenOption = ref
+        applyFn: fn (self: OpenOption, file: File)
+
+type
+    FileSystem = ref
+        createFn: fn (self: FileSystem, path: str, category: DiskWriteCategory): File
+        linkFn: fn (self: FileSystem, oldname: str, newname: str)
+        openFn: fn (self: FileSystem, path: str, opts: seq[OpenOption]): File
+        openReadWriteFn: fn (self: FileSystem, path: str,
+                             category: DiskWriteCategory,
+                             opts: seq[OpenOption]): File
+        openDirFn: fn (self: FileSystem, path: str): File
+        removeFn: fn (self: FileSystem, path: str)
+        removeAllFn: fn (self: FileSystem, path: str)
+        renameFn: fn (self: FileSystem, oldname: str, newname: str)
+        reuseForWriteFn: fn (self: FileSystem, oldname: str, newname: str,
+                             category: DiskWriteCategory): File
+        mkdirAllFn: fn (self: FileSystem, path: str, perm: uint32)
+        lockFn: fn (self: FileSystem, path: str): File
+        listFn: fn (self: FileSystem, path: str): seq[str]
+        statFn: fn (self: FileSystem, path: str): FileInfo
+        pathBaseFn: fn (self: FileSystem, path: str): str
+        pathJoinFn: fn (self: FileSystem, parts: seq[str]): str
+        pathDirFn: fn (self: FileSystem, path: str): str
+        diskUsageFn: fn (self: FileSystem, path: str): DiskUsage
+        unwrapFn: fn (self: FileSystem): FileSystem
+
+fn abstractMethod(name: str) =
+    raise newException(VfsError, "abstract method: " & name)
+
+fn Close(file: File) =
+    if file == nil or file.closeFn == nil:
+        abstractMethod("File.close")
+    file.closeFn(file)
+
+fn Read(file: File, dest: void*, size: int32): int32 =
+    if file == nil or file.readFn == nil:
+        abstractMethod("File.read")
+    return file.readFn(file, dest, size)
+
+fn ReadAt(file: File, dest: void*, size: int32, offset: int64): int32 =
+    if file == nil or file.readAtFn == nil:
+        abstractMethod("File.readAt")
+    return file.readAtFn(file, dest, size, offset)
+
+fn Write(file: File, src: void*, size: int32): int32 =
+    if file == nil or file.writeFn == nil:
+        abstractMethod("File.write")
+    return file.writeFn(file, src, size)
+
+fn WriteAt(file: File, src: void*, size: int32, offset: int64): int32 =
+    if file == nil or file.writeAtFn == nil:
+        abstractMethod("File.writeAt")
+    return file.writeAtFn(file, src, size, offset)
+
+fn Preallocate(file: File, offset: int64, length: int64) =
+    if file == nil or file.preallocateFn == nil:
+        abstractMethod("File.preallocate")
+    file.preallocateFn(file, offset, length)
+
+fn Stat(file: File): FileInfo =
+    if file == nil or file.statFn == nil:
+        abstractMethod("File.stat")
+    return file.statFn(file)
+
+fn Sync(file: File) =
+    if file == nil or file.syncFn == nil:
+        abstractMethod("File.sync")
+    file.syncFn(file)
+
+fn SyncData(file: File) =
+    if file == nil or file.syncDataFn == nil:
+        abstractMethod("File.syncData")
+    file.syncDataFn(file)
+
+fn SyncTo(file: File, length: int64): bool =
+    if file == nil or file.syncToFn == nil:
+        abstractMethod("File.syncTo")
+    return file.syncToFn(file, length)
+
+fn Prefetch(file: File, offset: int64, length: int64) =
+    if file == nil or file.prefetchFn == nil:
+        abstractMethod("File.prefetch")
+    file.prefetchFn(file, offset, length)
+
+fn Fd(file: File): uint64 =
+    if file == nil or file.fdFn == nil:
+        abstractMethod("File.fd")
+    return file.fdFn(file)
+
+fn Map(file: File, offset: int64, length: int32, access: MmapAccess): MmapRegion =
+    if file == nil or file.mapFn == nil:
+        abstractMethod("File.map")
+    return file.mapFn(file, offset, length, access)
+
+fn Apply(opt: OpenOption, file: File) =
+    if opt == nil or opt.applyFn == nil:
+        abstractMethod("OpenOption.apply")
+    opt.applyFn(opt, file)
+
+fn Create(fs: FileSystem, path: str, category: DiskWriteCategory): File =
+    if fs == nil or fs.createFn == nil:
+        abstractMethod("FileSystem.create")
+    return fs.createFn(fs, path, category)
+
+fn Link(fs: FileSystem, oldname: str, newname: str) =
+    if fs == nil or fs.linkFn == nil:
+        abstractMethod("FileSystem.link")
+    fs.linkFn(fs, oldname, newname)
+
+fn Open(fs: FileSystem, path: str, opts: seq[OpenOption]): File =
+    if fs == nil or fs.openFn == nil:
+        abstractMethod("FileSystem.open")
+    return fs.openFn(fs, path, opts)
+
+fn OpenReadWrite(fs: FileSystem, path: str,
+                 category: DiskWriteCategory,
+                 opts: seq[OpenOption]): File =
+    if fs == nil or fs.openReadWriteFn == nil:
+        abstractMethod("FileSystem.openReadWrite")
+    return fs.openReadWriteFn(fs, path, category, opts)
+
+fn OpenDir(fs: FileSystem, path: str): File =
+    if fs == nil or fs.openDirFn == nil:
+        abstractMethod("FileSystem.openDir")
+    return fs.openDirFn(fs, path)
+
+fn Remove(fs: FileSystem, path: str) =
+    if fs == nil or fs.removeFn == nil:
+        abstractMethod("FileSystem.remove")
+    fs.removeFn(fs, path)
+
+fn RemoveAll(fs: FileSystem, path: str) =
+    if fs == nil or fs.removeAllFn == nil:
+        abstractMethod("FileSystem.removeAll")
+    fs.removeAllFn(fs, path)
+
+fn Rename(fs: FileSystem, oldname: str, newname: str) =
+    if fs == nil or fs.renameFn == nil:
+        abstractMethod("FileSystem.rename")
+    fs.renameFn(fs, oldname, newname)
+
+fn ReuseForWrite(fs: FileSystem, oldname: str, newname: str, category: DiskWriteCategory): File =
+    if fs == nil or fs.reuseForWriteFn == nil:
+        abstractMethod("FileSystem.reuseForWrite")
+    return fs.reuseForWriteFn(fs, oldname, newname, category)
+
+fn MkdirAll(fs: FileSystem, path: str, perm: uint32) =
+    if fs == nil or fs.mkdirAllFn == nil:
+        abstractMethod("FileSystem.mkdirAll")
+    fs.mkdirAllFn(fs, path, perm)
+
+fn Lock(fs: FileSystem, path: str): File =
+    if fs == nil or fs.lockFn == nil:
+        abstractMethod("FileSystem.lock")
+    return fs.lockFn(fs, path)
+
+fn List(fs: FileSystem, path: str): seq[str] =
+    if fs == nil or fs.listFn == nil:
+        abstractMethod("FileSystem.list")
+    return fs.listFn(fs, path)
+
+fn StatPath(fs: FileSystem, path: str): FileInfo =
+    if fs == nil or fs.statFn == nil:
+        abstractMethod("FileSystem.stat")
+    return fs.statFn(fs, path)
+
+fn PathBase(fs: FileSystem, path: str): str =
+    if fs == nil or fs.pathBaseFn == nil:
+        abstractMethod("FileSystem.pathBase")
+    return fs.pathBaseFn(fs, path)
+
+fn PathJoin(fs: FileSystem, parts: seq[str]): str =
+    if fs == nil or fs.pathJoinFn == nil:
+        abstractMethod("FileSystem.pathJoin")
+    return fs.pathJoinFn(fs, parts)
+
+fn PathDir(fs: FileSystem, path: str): str =
+    if fs == nil or fs.pathDirFn == nil:
+        abstractMethod("FileSystem.pathDir")
+    return fs.pathDirFn(fs, path)
+
+fn DiskUsage(fs: FileSystem, path: str): DiskUsage =
+    if fs == nil or fs.diskUsageFn == nil:
+        abstractMethod("FileSystem.diskUsage")
+    return fs.diskUsageFn(fs, path)
+
+fn Unwrap(fs: FileSystem): FileSystem =
+    if fs == nil or fs.unwrapFn == nil:
+        abstractMethod("FileSystem.unwrap")
+    return fs.unwrapFn(fs)
+
+fn IsValid(region: MmapRegion): bool =
+    return region.base != nil and region.length > 0
+
+fn SetReleaser(region: var MmapRegion, hook: ReleaseHook) =
+    region.releaser = hook
+
+fn Unmap(region: var MmapRegion) =
+    if region.releaser != nil and region.base != nil and region.length > 0:
+        region.releaser(region.base, region.length)
+    region.base = nil
+    region.length = 0
+    region.releaser = nil

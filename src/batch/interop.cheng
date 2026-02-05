@@ -1,0 +1,165 @@
+module pebble_batch_interop
+
+import "../batch/db.cheng" as batch_db
+import "../batch/batch.cheng" as batch_impl
+import "../batch/types.cheng" as batch_types
+import "../core/types.cheng" as core_types
+import "../mem/types.cheng" as mem_types
+import "../runtime/resource_manager.cheng" as resource
+import cheng / stdlib / bootstrap / core / option as option
+import cheng / stdlib / bootstrap / strings as strings
+
+
+type
+    BatchOpKind = enum
+        BopPut
+        BopDelete
+        BopMerge
+
+type
+    BatchOperation =
+        kind: BatchOpKind
+        key: str
+        value: str
+
+type
+    BatchEntry = tuple[key: str, value: str]
+    BatchState = seq[BatchEntry]
+
+fn findKey(state: BatchState, key: str): int32 =
+    var i: int32 = 0
+    while i < state.len:
+        if state[i][0] == key:
+            return i
+        i = i + 1
+    return -1
+
+fn HasKey(state: BatchState, key: str): bool =
+    return findKey(state, key) >= 0
+
+fn SetValue(state: var BatchState, key: str, value: str) =
+    let idx = findKey(state, key)
+    if idx >= 0:
+        state[idx] = (key: key, value: value)
+    else:
+        state.add((key: key, value: value))
+
+fn DelKey(state: var BatchState, key: str) =
+    let idx = findKey(state, key)
+    if idx >= 0:
+        state.delete(idx)
+
+fn GetValue(state: BatchState, key: str): option.Option[str] =
+    let idx = findKey(state, key)
+    if idx >= 0:
+        return option.some(state[idx][1])
+    return option.none(str)
+
+fn GetOrDefault(state: BatchState, key: str, fallback: str = ""): str =
+    let idx = findKey(state, key)
+    if idx >= 0:
+        return state[idx][1]
+    return fallback
+
+fn CloneState(state: BatchState): BatchState =
+    var out: BatchState = @[]
+    var i: int32 = 0
+    while i < state.len:
+        out.add(state[i])
+        i = i + 1
+    return out
+
+fn DiffStates(lhs: BatchState, rhs: BatchState): seq[str] =
+    var diffs: seq[str] = @[]
+    var i: int32 = 0
+    while i < lhs.len:
+        let entry = lhs[i]
+        let leftKey = entry[0]
+        let leftVal = entry[1]
+        let rightOpt = GetValue(rhs, leftKey)
+        if not option.IsSome(rightOpt):
+            diffs.add("key '" & leftKey & "' missing in rhs")
+        else:
+            let rightVal = option.Get(rightOpt)
+            if rightVal != leftVal:
+                diffs.add("key '" & leftKey & "' mismatch lhs='" & leftVal & "' rhs='" & rightVal & "'")
+        i = i + 1
+    var j: int32 = 0
+    while j < rhs.len:
+        let entry = rhs[j]
+        let rightKey = entry[0]
+        if not HasKey(lhs, rightKey):
+            diffs.add("key '" & rightKey & "' missing in lhs")
+        j = j + 1
+    return diffs
+
+fn DefaultMergeOperator(key: core_types.Key,
+                        existing: option.Option[str],
+                        operands: seq[str]): option.Option[str] =
+    if operands.len == 0:
+        return existing
+    return option.some(operands[operands.len - 1])
+
+fn DefaultMemConfig(): mem_types.MemTableConfig =
+    return mem_types.MemTableConfig(
+        comparator: core_types.CompareBytewise,
+        mergeOperator: DefaultMergeOperator,
+        softLimitBytes: 0,
+        hardLimitBytes: 0,
+        resourceManager: nil,
+        resourceKind: resource.ResMemoryBytes,
+        flushExecutor: nil,
+        flushTrigger: nil,
+        throttleConfig: mem_types.ThrottleConfig(
+            enabled: false,
+            stallLimitBytes: 0,
+            releaseTargetBytes: 0,
+            baseDelayMs: 0,
+            maxDelayMs: 0,
+            priorityScaleLow: 0.0,
+            priorityScaleNormal: 0.0,
+            priorityScaleHigh: 0.0
+        )
+    )
+
+fn DefaultDbConfig(): batch_types.DBConfig =
+    return batch_types.DBConfig(
+        memConfig: DefaultMemConfig(),
+        maxConcurrentCommits: 1,
+        defaultOptions: batch_types.DefaultWriteOptions,
+        backpressure: nil,
+        walWriter: nil
+    )
+
+fn ApplyOperations(db: batch_db.DB,
+                   ops: seq[BatchOperation],
+                   state: var BatchState) =
+    if db == nil:
+        raise newException(batch_types.BatchError, "db is nil")
+    var i: int32 = 0
+    while i < ops.len:
+        let op = ops[i]
+        let batch = batch_db.NewBatch(db)
+        let key = core_types.ToKey(op.key)
+        if op.kind == BopPut:
+            batch_impl.Put(batch, key, op.value)
+        elif op.kind == BopDelete:
+            batch_impl.Delete(batch, key)
+        else:
+            batch_impl.Merge(batch, key, op.value)
+        discard batch_db.Commit(db, batch)
+        if op.kind == BopDelete:
+            if HasKey(state, op.key):
+                DelKey(state, op.key)
+        else:
+            let current = batch_db.GetLatest(db, key)
+            if option.IsSome(current):
+                SetValue(state, op.key, option.Get(current))
+            elif HasKey(state, op.key):
+                DelKey(state, op.key)
+        i = i + 1
+
+fn ApplyOperations(db: batch_db.DB, ops: seq[BatchOperation]): BatchState =
+    var state: BatchState = @[]
+    ApplyOperations(db, ops, state)
+    return state

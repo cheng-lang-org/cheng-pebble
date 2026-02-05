@@ -1,0 +1,68 @@
+module pebble_config_container
+
+import cheng / stdlib / bootstrap / tables as tables
+
+type
+    ServiceBase = ref
+        placeholder: int32
+
+type
+    ServiceLifecycle = enum
+        ServiceSingleton
+        ServiceTransient
+
+type
+    ServiceFactory = fn (c: ServiceContainer): ServiceBase
+
+type
+    ServiceRegistration =
+        factory: ServiceFactory
+        lifecycle: ServiceLifecycle
+
+type
+    ServiceContainer = ref
+        registry: tables.Table[ServiceRegistration]
+        cache: tables.Table[ServiceBase]
+
+fn NewServiceContainer(): ServiceContainer =
+    var container: ServiceContainer = new[ServiceContainer]()
+    if container != nil:
+        container.registry = tables.TableInit[ServiceRegistration](32)
+        container.cache = tables.TableInit[ServiceBase](32)
+    return container
+
+fn Register(c: ServiceContainer, name: str,
+            factory: ServiceFactory,
+            lifecycle: ServiceLifecycle = ServiceSingleton) =
+    if c == nil:
+        return
+    tables.TablePut[ServiceRegistration](c.registry, name,
+        ServiceRegistration(factory: factory, lifecycle: lifecycle))
+    if lifecycle == ServiceSingleton and tables.TableHas[ServiceBase](c.cache, name):
+        tables.TablePut[ServiceBase](c.cache, name, nil)
+
+fn HasService(c: ServiceContainer, name: str): bool =
+    if c == nil:
+        return false
+    return tables.TableHas[ServiceRegistration](c.registry, name)
+
+fn Resolve(c: ServiceContainer, name: str): ServiceBase =
+    if c == nil:
+        raise newException(KeyError, "service container is nil")
+    if not tables.TableHas[ServiceRegistration](c.registry, name):
+        raise newException(KeyError, "service not registered: " & name)
+    let registration = tables.TableGet[ServiceRegistration](c.registry, name)
+    if registration.lifecycle == ServiceSingleton:
+        if tables.TableHas[ServiceBase](c.cache, name):
+            let cached = tables.TableGet[ServiceBase](c.cache, name)
+            if cached != nil:
+                return cached
+        let instance = registration.factory(c)
+        tables.TablePut[ServiceBase](c.cache, name, instance)
+        return instance
+    return registration.factory(c)
+
+fn ClearCache(c: ServiceContainer) =
+    if c == nil:
+        return
+    c.cache = tables.TableInit[ServiceBase](32)

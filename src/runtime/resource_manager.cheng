@@ -1,0 +1,101 @@
+module pebble_runtime_resource_manager
+
+type
+    ResourceError =
+        of CatchableError
+
+type
+    ResourceKind = enum
+        ResMemoryBytes
+        ResDiskBytes
+        ResFileHandles
+        ResCompactionTokens
+
+type
+    ResourceQuota =
+        softLimit: int64
+        hardLimit: int64
+        inUse: int64
+
+type
+    ResourceTicket =
+        kind: ResourceKind
+        amount: int64
+
+type
+    ResourceManager = ref
+        quotas: array[4, ResourceQuota]
+        hasQuota: array[4, bool]
+
+fn kindIndex(kind: ResourceKind): int32 =
+    return (int32)(kind)
+
+fn NewResourceManager(): ResourceManager =
+    var rm: ResourceManager = new[ResourceManager]()
+    if rm != nil:
+        var i: int32 = 0
+        while i < 4:
+            rm.hasQuota[i] = false
+            rm.quotas[i] = ResourceQuota(softLimit: 0, hardLimit: 0, inUse: 0)
+            i = i + 1
+    return rm
+
+fn SetQuota(rm: ResourceManager, kind: ResourceKind,
+            softLimit: int64, hardLimit: int64) =
+    if softLimit > hardLimit:
+        raise newException(ResourceError, "soft limit exceeds hard limit")
+    if rm == nil:
+        return
+    let idx = kindIndex(kind)
+    rm.quotas[idx] = ResourceQuota(softLimit: softLimit,
+                                   hardLimit: hardLimit,
+                                   inUse: 0)
+    rm.hasQuota[idx] = true
+
+fn AcquireQuota(rm: ResourceManager, kind: ResourceKind,
+                amount: int64): ResourceTicket =
+    if rm == nil:
+        raise newException(ResourceError, "resource manager is nil")
+    let idx = kindIndex(kind)
+    if not rm.hasQuota[idx]:
+        raise newException(ResourceError, "quota not configured for kind")
+    var quota = rm.quotas[idx]
+    if quota.hardLimit > 0 and quota.inUse + amount > quota.hardLimit:
+        raise newException(ResourceError, "hard limit exceeded")
+    quota.inUse = quota.inUse + amount
+    rm.quotas[idx] = quota
+    return ResourceTicket(kind: kind, amount: amount)
+
+fn Release(rm: ResourceManager, ticket: ResourceTicket) =
+    if rm == nil:
+        return
+    let idx = kindIndex(ticket.kind)
+    if not rm.hasQuota[idx]:
+        return
+    var quota = rm.quotas[idx]
+    quota.inUse = quota.inUse - ticket.amount
+    if quota.inUse < 0:
+        quota.inUse = 0
+    rm.quotas[idx] = quota
+
+fn Utilization(rm: ResourceManager, kind: ResourceKind): float64 =
+    if rm == nil:
+        return 0.0
+    let idx = kindIndex(kind)
+    if not rm.hasQuota[idx]:
+        return 0.0
+    let quota = rm.quotas[idx]
+    if quota.hardLimit <= 0:
+        return 0.0
+    return quota.inUse.float / quota.hardLimit.float
+
+fn IsSoftExceeded(rm: ResourceManager, kind: ResourceKind): bool =
+    if rm == nil:
+        return false
+    let idx = kindIndex(kind)
+    if not rm.hasQuota[idx]:
+        return false
+    let quota = rm.quotas[idx]
+    if quota.softLimit <= 0:
+        return false
+    return quota.inUse >= quota.softLimit

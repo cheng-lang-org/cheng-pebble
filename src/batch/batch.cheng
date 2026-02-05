@@ -1,0 +1,253 @@
+module pebble_batch_batch
+
+import "../core/types.cheng" as core_types
+import "../mem/memtable.cheng" as memtable
+import "../mem/types.cheng" as mem_types
+import "../batch/types.cheng" as batch_types
+import cheng / stdlib / bootstrap / core / option as option
+import cheng / stdlib / bootstrap / strings as strings
+
+const
+    EntryOverhead = 16
+
+type
+    BatchResolver = fn (key: core_types.Key,
+                        snapshot: batch_types.Snapshot): option.Option[str]
+
+type
+    BatchBase = ref
+        ops: seq[batch_types.BatchOp]
+        approxBytes: int32
+        sealed: bool
+
+type
+    Batch = ref
+        base: BatchBase
+
+type
+    IndexedBatch = ref
+        base: BatchBase
+        index: mem_types.MemTable
+        resolver: BatchResolver
+        snapshot: batch_types.Snapshot
+        nextSeq: uint64
+
+fn NewBatch(cfg: mem_types.MemTableConfig): BatchBase =
+    cfg
+    var batch: BatchBase = new[BatchBase]()
+    if batch != nil:
+        batch.ops = @[]
+        batch.approxBytes = 0
+        batch.sealed = false
+    return batch
+
+fn cloneForIndex(cfg: mem_types.MemTableConfig): mem_types.MemTableConfig =
+    var out = cfg
+    out.softLimitBytes = 0
+    out.hardLimitBytes = 0
+    out.resourceManager = nil
+    return out
+
+fn NewIndexedBatch(cfg: mem_types.MemTableConfig,
+                   resolver: BatchResolver,
+                   snapshot: batch_types.Snapshot): IndexedBatch =
+    let indexCfg = cloneForIndex(cfg)
+    var base: BatchBase = new[BatchBase]()
+    if base != nil:
+        base.ops = @[]
+        base.approxBytes = 0
+        base.sealed = false
+    var idx: IndexedBatch = new[IndexedBatch]()
+    if idx != nil:
+        idx.base = base
+        idx.resolver = resolver
+        idx.snapshot = snapshot
+        idx.index = memtable.InitMemTable(indexCfg)
+        idx.nextSeq = 0
+    return idx
+
+fn Base(batch: IndexedBatch): BatchBase =
+    if batch == nil:
+        return nil
+    return batch.base
+
+fn BatchLen(batch: BatchBase): int32 =
+    if batch == nil:
+        return 0
+    return batch.ops.len
+
+fn IsEmpty(batch: BatchBase): bool =
+    return BatchLen(batch) == 0
+
+fn EstimatedBytes(batch: BatchBase): int32 =
+    if batch == nil:
+        return 0
+    return batch.approxBytes
+
+fn IsCommitted(batch: BatchBase): bool =
+    if batch == nil:
+        return false
+    return batch.sealed
+
+fn MarkCommitted(batch: BatchBase) =
+    if batch == nil:
+        return
+    batch.sealed = true
+
+fn Reset(batch: BatchBase) =
+    if batch == nil:
+        return
+    batch.ops.setLen(0)
+    batch.approxBytes = 0
+    batch.sealed = false
+
+fn ResetIndexed(batch: IndexedBatch) =
+    if batch == nil:
+        return
+    Reset(batch.base)
+    if batch.index != nil:
+        memtable.Clear(batch.index)
+    batch.nextSeq = 0
+
+fn ensureMutable(batch: BatchBase) =
+    if batch == nil:
+        raise newException(batch_types.BatchError, "batch is nil")
+    if batch.sealed:
+        raise newException(batch_types.BatchError,
+            "batch has been committed/applied; call reset before reusing")
+
+fn calcEntryBytes(op: batch_types.BatchOp): int32 =
+    return core_types.ToBytes(op.key).len + op.value.len + EntryOverhead
+
+fn appendIndex(batch: IndexedBatch, op: batch_types.BatchOp) =
+    if batch == nil or batch.index == nil:
+        return
+    batch.nextSeq = batch.nextSeq + 1
+    let entry = mem_types.ApplyEntry(
+        key: op.key,
+        seq: core_types.ToSequence(batch.nextSeq),
+        kind: op.kind,
+        value: op.value
+    )
+    memtable.ApplyBatch(batch.index, [entry])
+
+fn appendOp(batch: BatchBase, op: batch_types.BatchOp, idx: IndexedBatch) =
+    ensureMutable(batch)
+    batch.ops.add(op)
+    batch.approxBytes = batch.approxBytes + calcEntryBytes(op)
+    if idx != nil:
+        appendIndex(idx, op)
+
+fn writeUint32(buf: var seq[uint8], value: uint32) =
+    buf.add(uint8(value & uint32(0xFF)))
+    buf.add(uint8((value shr 8) & uint32(0xFF)))
+    buf.add(uint8((value shr 16) & uint32(0xFF)))
+    buf.add(uint8((value shr 24) & uint32(0xFF)))
+
+fn writeUint64(buf: var seq[uint8], value: uint64) =
+    buf.add(uint8(value & uint64(0xFF)))
+    buf.add(uint8((value shr 8) & uint64(0xFF)))
+    buf.add(uint8((value shr 16) & uint64(0xFF)))
+    buf.add(uint8((value shr 24) & uint64(0xFF)))
+    buf.add(uint8((value shr 32) & uint64(0xFF)))
+    buf.add(uint8((value shr 40) & uint64(0xFF)))
+    buf.add(uint8((value shr 48) & uint64(0xFF)))
+    buf.add(uint8((value shr 56) & uint64(0xFF)))
+
+fn writeString(buf: var seq[uint8], text: str) =
+    var i: int32 = 0
+    let n: int32 = text.len
+    while i < n:
+        let ch = strings.charAt(text, i)
+        buf.add(uint8(ord(ch)))
+        i = i + 1
+
+fn ToWalPayload(batch: BatchBase, entries: openArray[mem_types.ApplyEntry]): seq[uint8] =
+    if entries.len == 0:
+        return @[]
+    var out = newSeq[uint8]()
+    out.writeUint32(uint32(entries.len))
+    for entry in entries:
+        out.add(uint8(entry.kind))
+        out.writeUint64(core_types.ToUint64(entry.seq))
+        let keyBytes = core_types.ToBytes(entry.key)
+        out.writeUint32(uint32(keyBytes.len))
+        out.writeString(keyBytes)
+        out.writeUint32(uint32(entry.value.len))
+        out.writeString(entry.value)
+    return out
+
+fn Put(batch: BatchBase, key: core_types.Key, value: str, idx: IndexedBatch = nil) =
+    let op = batch_types.BatchOp(key: key, value: value, kind: mem_types.MemValueSet)
+    appendOp(batch, op, idx)
+
+fn Delete(batch: BatchBase, key: core_types.Key, idx: IndexedBatch = nil) =
+    let op = batch_types.BatchOp(key: key, value: "", kind: mem_types.MemValueDelete)
+    appendOp(batch, op, idx)
+
+fn Merge(batch: BatchBase, key: core_types.Key, operand: str, idx: IndexedBatch = nil) =
+    let op = batch_types.BatchOp(key: key, value: operand, kind: mem_types.MemValueMerge)
+    appendOp(batch, op, idx)
+
+fn PutIndexed(batch: IndexedBatch, key: core_types.Key, value: str) =
+    if batch == nil:
+        return
+    Put(batch.base, key, value, batch)
+
+fn DeleteIndexed(batch: IndexedBatch, key: core_types.Key) =
+    if batch == nil:
+        return
+    Delete(batch.base, key, batch)
+
+fn MergeIndexed(batch: IndexedBatch, key: core_types.Key, operand: str) =
+    if batch == nil:
+        return
+    Merge(batch.base, key, operand, batch)
+
+fn Apply(dest: BatchBase, src: BatchBase, idx: IndexedBatch = nil) =
+    if src == nil:
+        return
+    for op in src.ops:
+        appendOp(dest, op, idx)
+
+fn ToApplyEntries(batch: BatchBase, startSeq: core_types.SequenceNumber): seq[mem_types.ApplyEntry] =
+    if batch == nil or batch.ops.len == 0:
+        return @[]
+    let count = batch.ops.len
+    var entries = newSeq[mem_types.ApplyEntry](count)
+    var seqVal = core_types.ToUint64(startSeq)
+    var i: int32 = 0
+    while i < count:
+        let op = batch.ops[i]
+        entries[i] = mem_types.ApplyEntry(
+            key: op.key,
+            seq: core_types.ToSequence(seqVal),
+            kind: op.kind,
+            value: op.value
+        )
+        seqVal = seqVal + 1
+        i = i + 1
+    return entries
+
+fn Stats(batch: BatchBase): batch_types.BatchStats =
+    return batch_types.BatchStats(ops: BatchLen(batch), bytes: EstimatedBytes(batch))
+
+fn Snapshot(batch: IndexedBatch): batch_types.Snapshot =
+    if batch == nil:
+        return batch_types.Snapshot(seq: core_types.ToSequence(0))
+    return batch.snapshot
+
+fn Get(batch: IndexedBatch, key: core_types.Key, snapshot: batch_types.Snapshot): option.Option[str] =
+    if batch == nil or batch.index == nil:
+        return option.none(str)
+    let local = memtable.Get(batch.index, key, core_types.ToSequence(core_types.ToUint64(snapshot.seq)))
+    if option.IsSome(local):
+        return local
+    if batch.resolver != nil:
+        return batch.resolver(key, snapshot)
+    return option.none(str)
+
+fn GetLatest(batch: IndexedBatch, key: core_types.Key): option.Option[str] =
+    if batch == nil:
+        return option.none(str)
+    return Get(batch, key, batch.snapshot)

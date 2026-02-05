@@ -1,0 +1,25 @@
+module pebble_tooling
+
+import "./tooling/cli_core.cheng" as cli_core
+import "./tooling/core_commands.cheng" as core_commands
+import "./tooling/sstable_commands.cheng" as sstable_commands
+
+
+type
+    CliError = cli_core.CliError
+    CliHandler = cli_core.CliHandler
+    CliContext = cli_core.CliContext
+    CliCommand = cli_core.CliCommand
+
+fn NewRootCommand(name: str = "pebble"): CliCommand =
+    return cli_core.NewCliCommand(name, "pebble tooling")
+
+fn RegisterDefaultCommands(root: CliCommand) =
+    if root == nil:
+        return
+    core_commands.RegisterCoreCommands(root)
+    sstable_commands.RegisterSstableCommands(root)
+
+fn Dispatch(root: CliCommand, args: seq[str], programName: str = "pebble_cli") =
+    var ctx = cli_core.CliContext(programName: programName, commandPath: @[])
+    cli_core.Dispatch(root, args, ctx)

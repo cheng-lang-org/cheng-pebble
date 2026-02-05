@@ -1,0 +1,280 @@
+module pebble_vfs_mount_fs
+
+import "../vfs/types.cheng" as vtypes
+import cheng / stdlib / bootstrap / strings as strings
+import cheng / stdlib / bootstrap / std / os as os
+
+type
+    MountPoint =
+        logicalPrefix: str
+        physicalPrefix: str
+        readOnly: bool
+
+type
+    MountBinding =
+        logical: str
+        physical: str
+        readOnly: bool
+
+type
+    MountResolution =
+        path: str
+        readOnly: bool
+        matched: bool
+
+type
+    MountFileSystemState = ref
+        base: vtypes.FileSystem
+        bindings: seq[MountBinding]
+        passThrough: bool
+
+fn isPathSep(ch: char): bool =
+    return ch == '/' or ch == '\\'
+
+fn isAlphaAscii(ch: char): bool =
+    return (ch >= 'A' and ch <= 'Z') or (ch >= 'a' and ch <= 'z')
+
+fn isDriveRoot(path: str): bool =
+    return strings.len(path) == 3 and strings.charAt(path, 1) == ':' and
+        isAlphaAscii(strings.charAt(path, 0)) and isPathSep(strings.charAt(path, 2))
+
+fn normalizeSep(path: str): str =
+    if path == nil or strings.len(path) == 0:
+        return ""
+    var out: str = ""
+    var i: int32 = 0
+    let n: int32 = strings.len(path)
+    while i < n:
+        let ch: char = strings.charAt(path, i)
+        if ch == '\\':
+            out = out & "/"
+        else:
+            out = out & strings.charToStr(ch)
+        i = i + 1
+    return out
+
+fn stripTrailingSep(path: str): str =
+    if path == nil or strings.len(path) == 0:
+        return ""
+    if isDriveRoot(path):
+        return path
+    var end: int32 = strings.len(path) - 1
+    while end > 0 and isPathSep(strings.charAt(path, end)):
+        end = end - 1
+    if end == strings.len(path) - 1:
+        return path
+    return path[0..end]
+
+fn stripLeadingSep(path: str): str =
+    if path == nil or strings.len(path) == 0:
+        return ""
+    var idx: int32 = 0
+    let n: int32 = strings.len(path)
+    while idx < n and isPathSep(strings.charAt(path, idx)):
+        idx = idx + 1
+    if idx >= n:
+        return ""
+    return path[idx..n - 1]
+
+fn startsWith(text: str, prefix: str): bool =
+    if prefix == nil or strings.len(prefix) == 0:
+        return true
+    if text == nil:
+        return false
+    let n: int32 = strings.len(text)
+    let m: int32 = strings.len(prefix)
+    if n < m:
+        return false
+    var i: int32 = 0
+    while i < m:
+        if strings.charAt(text, i) != strings.charAt(prefix, i):
+            return false
+        i = i + 1
+    return true
+
+fn prefixWithSep(binding: MountBinding): str =
+    if binding.logical == nil or strings.len(binding.logical) == 0:
+        return ""
+    let last: char = strings.charAt(binding.logical, strings.len(binding.logical) - 1)
+    if isPathSep(last):
+        return binding.logical
+    return binding.logical & "/"
+
+fn canonicalLogical(path: str): str =
+    if path == nil or strings.len(path) == 0:
+        return ""
+    let normalized = stripTrailingSep(normalizeSep(path))
+    if normalized == ".":
+        return ""
+    return normalized
+
+fn canonicalPhysical(path: str): str =
+    if path == nil or strings.len(path) == 0:
+        return ""
+    let normalized = stripTrailingSep(normalizeSep(path))
+    if normalized == ".":
+        return ""
+    if os.isAbsolute(normalized):
+        return normalized
+    return os.absolutePath(normalized)
+
+fn sortBindings(bindings: var seq[MountBinding]) =
+    var i: int32 = 0
+    while i < bindings.len:
+        var maxIdx: int32 = i
+        var j: int32 = i + 1
+        while j < bindings.len:
+            if strings.len(bindings[j].logical) > strings.len(bindings[maxIdx].logical):
+                maxIdx = j
+            j = j + 1
+        if maxIdx != i:
+            let tmp = bindings[i]
+            bindings[i] = bindings[maxIdx]
+            bindings[maxIdx] = tmp
+        i = i + 1
+
+fn resolve(state: MountFileSystemState, path: str): MountResolution =
+    let logical = canonicalLogical(path)
+    var i: int32 = 0
+    while i < state.bindings.len:
+        let binding = state.bindings[i]
+        let prefix = prefixWithSep(binding)
+        if binding.logical == "" or logical == binding.logical or
+            (strings.len(logical) > strings.len(binding.logical) and startsWith(logical, prefix)):
+            let suffix =
+                if binding.logical == "":
+                    logical
+                elif strings.len(logical) == strings.len(binding.logical):
+                    ""
+                else:
+                    stripLeadingSep(logical[strings.len(binding.logical)..strings.len(logical) - 1])
+            let physical =
+                if strings.len(suffix) == 0:
+                    binding.physical
+                elif strings.len(binding.physical) == 0:
+                    suffix
+                else:
+                    os.joinPath(binding.physical, suffix)
+            return MountResolution(path: physical, readOnly: binding.readOnly, matched: true)
+        i = i + 1
+    if state.passThrough:
+        return MountResolution(path: logical, readOnly: false, matched: false)
+    raise newException(vtypes.VfsError, "path not mounted: " & path)
+
+fn ensureWritable(state: MountFileSystemState, res: MountResolution, op: str, original: str) =
+    discard state
+    if res.readOnly:
+        raise newException(vtypes.VfsError, op & " hits read-only mount: " & original)
+
+fn NewMountPoint(logicalPrefix: str, physicalPrefix: str, readOnly: bool = true): MountPoint =
+    return MountPoint(logicalPrefix: logicalPrefix, physicalPrefix: physicalPrefix, readOnly: readOnly)
+
+fn ReadOnlyMount(logicalPrefix: str, physicalPrefix: str): MountPoint =
+    return NewMountPoint(logicalPrefix, physicalPrefix, true)
+
+fn ReadWriteMount(logicalPrefix: str, physicalPrefix: str): MountPoint =
+    return NewMountPoint(logicalPrefix, physicalPrefix, false)
+
+fn NewMountFileSystem(base: vtypes.FileSystem, mounts: seq[MountPoint],
+                      passThroughUnmatched: bool = false): vtypes.FileSystem =
+    if base == nil:
+        raise newException(ValueError, "base FileSystem must not be nil")
+    var bindings: seq[MountBinding] = @[]
+    var i: int32 = 0
+    while i < mounts.len:
+        let mount = mounts[i]
+        let logical = canonicalLogical(mount.logicalPrefix)
+        let physical = canonicalPhysical(mount.physicalPrefix)
+        bindings.add(MountBinding(logical: logical, physical: physical, readOnly: mount.readOnly))
+        i = i + 1
+    sortBindings(bindings)
+    let state = MountFileSystemState(base: base, bindings: bindings, passThrough: passThroughUnmatched)
+    var fs: vtypes.FileSystem = new[vtypes.FileSystem]()
+    fs.createFn = fn (self: vtypes.FileSystem, path: str,
+                      category: vtypes.DiskWriteCategory): vtypes.File =
+        discard self
+        let res = resolve(state, path)
+        ensureWritable(state, res, "create", path)
+        return vtypes.Create(state.base, res.path, category)
+    fs.linkFn = fn (self: vtypes.FileSystem, oldname: str, newname: str) =
+        discard self
+        let src = resolve(state, oldname)
+        let dst = resolve(state, newname)
+        ensureWritable(state, src, "link", oldname)
+        ensureWritable(state, dst, "link", newname)
+        vtypes.Link(state.base, src.path, dst.path)
+    fs.openFn = fn (self: vtypes.FileSystem, path: str, opts: seq[vtypes.OpenOption]): vtypes.File =
+        discard self
+        let res = resolve(state, path)
+        return vtypes.Open(state.base, res.path, opts)
+    fs.openReadWriteFn = fn (self: vtypes.FileSystem, path: str,
+                             category: vtypes.DiskWriteCategory,
+                             opts: seq[vtypes.OpenOption]): vtypes.File =
+        discard self
+        let res = resolve(state, path)
+        ensureWritable(state, res, "openReadWrite", path)
+        return vtypes.OpenReadWrite(state.base, res.path, category, opts)
+    fs.openDirFn = fn (self: vtypes.FileSystem, path: str): vtypes.File =
+        discard self
+        let res = resolve(state, path)
+        return vtypes.OpenDir(state.base, res.path)
+    fs.removeFn = fn (self: vtypes.FileSystem, path: str) =
+        discard self
+        let res = resolve(state, path)
+        ensureWritable(state, res, "remove", path)
+        vtypes.Remove(state.base, res.path)
+    fs.removeAllFn = fn (self: vtypes.FileSystem, path: str) =
+        discard self
+        let res = resolve(state, path)
+        ensureWritable(state, res, "removeAll", path)
+        vtypes.RemoveAll(state.base, res.path)
+    fs.renameFn = fn (self: vtypes.FileSystem, oldname: str, newname: str) =
+        discard self
+        let src = resolve(state, oldname)
+        let dst = resolve(state, newname)
+        ensureWritable(state, src, "rename", oldname)
+        ensureWritable(state, dst, "rename", newname)
+        vtypes.Rename(state.base, src.path, dst.path)
+    fs.reuseForWriteFn = fn (self: vtypes.FileSystem, oldname: str, newname: str,
+                             category: vtypes.DiskWriteCategory): vtypes.File =
+        discard self
+        let src = resolve(state, oldname)
+        let dst = resolve(state, newname)
+        ensureWritable(state, src, "reuseForWrite", oldname)
+        ensureWritable(state, dst, "reuseForWrite", newname)
+        return vtypes.ReuseForWrite(state.base, src.path, dst.path, category)
+    fs.mkdirAllFn = fn (self: vtypes.FileSystem, path: str, perm: uint32) =
+        discard self
+        let res = resolve(state, path)
+        ensureWritable(state, res, "mkdirAll", path)
+        vtypes.MkdirAll(state.base, res.path, perm)
+    fs.lockFn = fn (self: vtypes.FileSystem, path: str): vtypes.File =
+        discard self
+        let res = resolve(state, path)
+        ensureWritable(state, res, "lock", path)
+        return vtypes.Lock(state.base, res.path)
+    fs.listFn = fn (self: vtypes.FileSystem, path: str): seq[str] =
+        discard self
+        let res = resolve(state, path)
+        return vtypes.List(state.base, res.path)
+    fs.statFn = fn (self: vtypes.FileSystem, path: str): vtypes.FileInfo =
+        discard self
+        let res = resolve(state, path)
+        return vtypes.StatPath(state.base, res.path)
+    fs.pathBaseFn = fn (self: vtypes.FileSystem, path: str): str =
+        discard self
+        return vtypes.PathBase(state.base, path)
+    fs.pathJoinFn = fn (self: vtypes.FileSystem, parts: seq[str]): str =
+        discard self
+        return vtypes.PathJoin(state.base, parts)
+    fs.pathDirFn = fn (self: vtypes.FileSystem, path: str): str =
+        discard self
+        return vtypes.PathDir(state.base, path)
+    fs.diskUsageFn = fn (self: vtypes.FileSystem, path: str): vtypes.DiskUsage =
+        discard self
+        let res = resolve(state, path)
+        return vtypes.DiskUsage(state.base, res.path)
+    fs.unwrapFn = fn (self: vtypes.FileSystem): vtypes.FileSystem =
+        discard self
+        return state.base
+    return fs

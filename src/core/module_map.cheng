@@ -1,0 +1,25 @@
+module pebble_core_module_map
+
+import cheng / stdlib / bootstrap / tables as tables
+
+fn PackageMap(): tables.Table[str] =
+    var mapping = tables.TableInit[str](32)
+    tables.TablePut[str](mapping, "github.com/cockroachdb/pebble", "pebble.core")
+    tables.TablePut[str](mapping, "github.com/cockroachdb/pebble/batch", "pebble.batch")
+    tables.TablePut[str](mapping, "github.com/cockroachdb/pebble/cache", "pebble.sstable")
+    tables.TablePut[str](mapping, "github.com/cockroachdb/pebble/compaction", "pebble.compaction")
+    tables.TablePut[str](mapping, "github.com/cockroachdb/pebble/iterator", "pebble.read")
+    tables.TablePut[str](mapping, "github.com/cockroachdb/pebble/internal", "pebble.manifest")
+    tables.TablePut[str](mapping, "github.com/cockroachdb/pebble/internal/manifest", "pebble.manifest")
+    tables.TablePut[str](mapping, "github.com/cockroachdb/pebble/objstorage", "pebble.vfs")
+    tables.TablePut[str](mapping, "github.com/cockroachdb/pebble/sstable", "pebble.sstable")
+    tables.TablePut[str](mapping, "github.com/cockroachdb/pebble/memtable", "pebble.mem")
+    tables.TablePut[str](mapping, "github.com/cockroachdb/pebble/vfs", "pebble.vfs")
+    tables.TablePut[str](mapping, "github.com/cockroachdb/pebble/rangekey", "pebble.ext")
+    tables.TablePut[str](mapping, "github.com/cockroachdb/pebble/rangedel", "pebble.ext")
+    tables.TablePut[str](mapping, "github.com/cockroachdb/pebble/record", "pebble.wal")
+    tables.TablePut[str](mapping, "github.com/cockroachdb/pebble/merging", "pebble.mem")
+    tables.TablePut[str](mapping, "github.com/cockroachdb/pebble/bloom", "pebble.sstable")
+    tables.TablePut[str](mapping, "github.com/cockroachdb/pebble/options", "pebble.config")
+    tables.TablePut[str](mapping, "github.com/cockroachdb/pebble/tool", "pebble.tooling")
+    return mapping

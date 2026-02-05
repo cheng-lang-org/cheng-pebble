@@ -1,0 +1,262 @@
+module pebble_sstable_table_reader
+
+import "../core/types.cheng" as core_types
+import "../sstable/types.cheng" as sstable_types
+import "../sstable/encoding.cheng" as enc
+import "../sstable/block.cheng" as block
+import "../sstable/filter.cheng" as filter
+import "../sstable/cache.cheng" as cache
+import cheng / stdlib / bootstrap / core / option as option
+import cheng / stdlib / bootstrap / strings as strings
+import cheng / stdlib / bootstrap / std / strutils as strutils
+
+const
+    FooterMagic = "SSTN"
+
+type
+    TableReader = ref
+        comparator: core_types.Comparator
+        image: sstable_types.SSTableImage
+        footer: sstable_types.TableFooter
+        indexEntries: seq[sstable_types.IndexEntry]
+        bloom: option.Option[sstable_types.BloomFilter]
+        props: sstable_types.TableProperties
+        cache: cache.BlockCache
+        cacheNamespace: str
+
+var readerIdCounter: int32 = 0
+
+fn nextReaderNamespace(): str =
+    readerIdCounter = readerIdCounter + 1
+    return "sst-reader-" & strings.`$`(readerIdCounter)
+
+fn cacheKey(reader: TableReader, handle: sstable_types.BlockHandle): str =
+    return reader.cacheNamespace & ":" & strings.`$`(handle.offset) & ":" & strings.`$`(handle.length)
+
+fn validateHandle(totalLen: int32, handle: sstable_types.BlockHandle, label: str) =
+    if handle.offset < 0 or handle.length < 0:
+        raise newException(sstable_types.SSTError, label & " handle has negative values")
+    if handle.offset > totalLen or handle.length > totalLen:
+        raise newException(sstable_types.SSTError, label & " handle exceeds table bounds")
+    let endPos = handle.offset + handle.length
+    if endPos > totalLen:
+        raise newException(sstable_types.SSTError, label & " handle length out of bounds")
+
+fn sliceBytes(data: seq[uint8], start: int32, length: int32): seq[uint8] =
+    if length <= 0:
+        return @[]
+    var out = newSeq[uint8](length)
+    var i: int32 = 0
+    while i < length:
+        out[i] = data[start + i]
+        i = i + 1
+    return out
+
+fn sliceForHandle(data: seq[uint8], handle: sstable_types.BlockHandle, label: str): seq[uint8] =
+    validateHandle(data.len, handle, label)
+    if handle.length == 0:
+        return @[]
+    return sliceBytes(data, handle.offset, handle.length)
+
+fn loadBlock(reader: TableReader, handle: sstable_types.BlockHandle, label: str): seq[uint8] =
+    if reader.cache != nil:
+        let key = cacheKey(reader, handle)
+        let cached = cache.Get(reader.cache, key)
+        if option.IsSome(cached):
+            return option.Get(cached)
+        let slice = sliceForHandle(reader.image.buffer, handle, label)
+        cache.Put(reader.cache, key, slice)
+        return slice
+    return sliceForHandle(reader.image.buffer, handle, label)
+
+fn decodeFooter(data: seq[uint8]): sstable_types.TableFooter =
+    let magicLen: int32 = strings.len(FooterMagic)
+    if data.len < magicLen + 4:
+        raise newException(sstable_types.SSTError, "sstable too small for footer")
+    let magicOffset = data.len - magicLen
+    var i: int32 = 0
+    while i < magicLen:
+        let expect = uint8(strings.charAt(FooterMagic, i))
+        if data[magicOffset + i] != expect:
+            raise newException(sstable_types.SSTError, "footer magic mismatch")
+        i = i + 1
+    let lengthOffset = magicOffset - 4
+    if lengthOffset < 0:
+        raise newException(sstable_types.SSTError, "footer corrupted")
+    var payloadLen: int32 = 0
+    var shift: int32 = 0
+    while shift < 4:
+        payloadLen = payloadLen or (int32(data[lengthOffset + shift]) shl (shift * 8))
+        shift = shift + 1
+    let payloadStart = lengthOffset - payloadLen
+    if payloadStart < 0:
+        raise newException(sstable_types.SSTError, "footer length out of bounds")
+    if payloadStart + payloadLen != lengthOffset:
+        raise newException(sstable_types.SSTError, "footer payload length mismatch")
+    var pos: int32 = payloadStart
+    let indexOffset = int32(enc.DecodeVarint(data, &pos))
+    let indexLength = int32(enc.DecodeVarint(data, &pos))
+    let hasFilter = enc.DecodeVarint(data, &pos)
+    var filterHandle = option.none(sstable_types.BlockHandle)
+    if hasFilter == uint64(1):
+        let filterOffset = int32(enc.DecodeVarint(data, &pos))
+        let filterLength = int32(enc.DecodeVarint(data, &pos))
+        filterHandle = option.some(sstable_types.InitBlockHandle(filterOffset, filterLength))
+    let metaOffset = int32(enc.DecodeVarint(data, &pos))
+    let metaLength = int32(enc.DecodeVarint(data, &pos))
+    return sstable_types.TableFooter(
+        indexHandle: sstable_types.InitBlockHandle(indexOffset, indexLength),
+        filterHandle: filterHandle,
+        metaHandle: sstable_types.InitBlockHandle(metaOffset, metaLength)
+    )
+
+fn decodeIndex(data: seq[uint8]): seq[sstable_types.IndexEntry] =
+    var pos: int32 = 0
+    let count = int32(enc.DecodeVarint(data, &pos))
+    var i: int32 = 0
+    var entries: seq[sstable_types.IndexEntry] = @[]
+    while i < count:
+        let separatorBytes = enc.ReadBytes(data, &pos)
+        let offset = int32(enc.DecodeVarint(data, &pos))
+        let length = int32(enc.DecodeVarint(data, &pos))
+        entries.add(sstable_types.IndexEntry(
+            separator: core_types.ToKey(separatorBytes),
+            handle: sstable_types.InitBlockHandle(offset, length)
+        ))
+        i = i + 1
+    return entries
+
+fn decodeProperties(data: seq[uint8]): sstable_types.TableProperties =
+    var props: sstable_types.TableProperties
+    var pos: int32 = 0
+    let count = int32(enc.DecodeVarint(data, &pos))
+    var i: int32 = 0
+    while i < count:
+        let key = enc.ReadBytes(data, &pos)
+        let value = enc.ReadBytes(data, &pos)
+        if key == "num_entries":
+            props.numEntries = int32(strutils.parseInt(value))
+        elif key == "raw_key_size":
+            props.rawKeySize = int32(strutils.parseInt(value))
+        elif key == "raw_value_size":
+            props.rawValueSize = int32(strutils.parseInt(value))
+        elif key == "smallest_key":
+            props.smallestKey = option.some(core_types.ToKey(value))
+        elif key == "largest_key":
+            props.largestKey = option.some(core_types.ToKey(value))
+        elif key == "bloom_bits_per_key":
+            props.bloomBitsPerKey = option.some(int32(strutils.parseInt(value)))
+        i = i + 1
+    return props
+
+fn NewTableReader(data: seq[uint8], comparator: core_types.Comparator = core_types.CompareBytewise,
+                  cache: cache.BlockCache = nil): TableReader =
+    let footer = decodeFooter(data)
+    validateHandle(data.len, footer.indexHandle, "index")
+    let indexSlice = sliceForHandle(data, footer.indexHandle, "index")
+    let indexEntries = decodeIndex(indexSlice)
+    var sections: seq[sstable_types.TableSection] = @[]
+    var i: int32 = 0
+    while i < indexEntries.len:
+        let entry = indexEntries[i]
+        validateHandle(data.len, entry.handle, "data")
+        sections.add(sstable_types.TableSection(kind: sstable_types.BlockData, handle: entry.handle))
+        i = i + 1
+    sections.add(sstable_types.TableSection(kind: sstable_types.BlockIndex, handle: footer.indexHandle))
+    var bloom = option.none(sstable_types.BloomFilter)
+    if option.IsSome(footer.filterHandle):
+        let handle = option.Get(footer.filterHandle)
+        let filterSlice = sliceForHandle(data, handle, "filter")
+        bloom = option.some(filter.DecodeBloomFilter(filterSlice))
+        sections.add(sstable_types.TableSection(kind: sstable_types.BlockFilter, handle: handle))
+    validateHandle(data.len, footer.metaHandle, "meta")
+    let metaSlice = sliceForHandle(data, footer.metaHandle, "meta")
+    sections.add(sstable_types.TableSection(kind: sstable_types.BlockMeta, handle: footer.metaHandle))
+    let props = decodeProperties(metaSlice)
+    var reader: TableReader = new[TableReader]()
+    if reader != nil:
+        reader.comparator = comparator
+        reader.image = sstable_types.SSTableImage(buffer: data, sections: sections)
+        reader.footer = footer
+        reader.indexEntries = indexEntries
+        reader.bloom = bloom
+        reader.props = props
+        reader.cache = cache
+        reader.cacheNamespace = nextReaderNamespace()
+    return reader
+
+fn Properties(reader: TableReader): sstable_types.TableProperties =
+    return reader.props
+
+fn MaybeContains(reader: TableReader, key: core_types.Key): bool =
+    if reader == nil:
+        return false
+    if option.IsSome(reader.bloom):
+        return filter.MaybeContains(option.Get(reader.bloom), key)
+    return true
+
+fn locateBlock(reader: TableReader, key: core_types.Key): option.Option[sstable_types.BlockHandle] =
+    if reader.indexEntries.len == 0:
+        return option.none(sstable_types.BlockHandle)
+    var lo: int32 = 0
+    var hi: int32 = reader.indexEntries.len - 1
+    var candidate = option.none(sstable_types.BlockHandle)
+    while lo <= hi:
+        let mid = (lo + hi) shr 1
+        let entry = reader.indexEntries[mid]
+        let cmp = reader.comparator(key, entry.separator)
+        if cmp <= 0:
+            candidate = option.some(entry.handle)
+            if mid == 0:
+                break
+            hi = mid - 1
+        else:
+            lo = mid + 1
+    return candidate
+
+fn Get(reader: TableReader, key: core_types.Key): option.Option[str] =
+    if reader == nil:
+        return option.none(str)
+    if not MaybeContains(reader, key):
+        return option.none(str)
+    let blockHandleOpt = locateBlock(reader, key)
+    if not option.IsSome(blockHandleOpt):
+        return option.none(str)
+    let handle = option.Get(blockHandleOpt)
+    let slice = loadBlock(reader, handle, "data")
+    var blockIter = block.InitBlockIterator(slice)
+    while true:
+        let nextEntry = block.Next(blockIter)
+        if not option.IsSome(nextEntry):
+            break
+        let entry = option.Get(nextEntry)
+        let cmp = reader.comparator(entry.key, key)
+        if cmp == 0:
+            return option.some(entry.value)
+        if cmp > 0:
+            break
+    return option.none(str)
+
+iterator Scan(reader: TableReader): tuple[key: core_types.Key, value: str] =
+    if reader == nil:
+        return
+    for entry in reader.indexEntries:
+        let handle = entry.handle
+        let slice = loadBlock(reader, handle, "data")
+        var blockIter = block.InitBlockIterator(slice)
+        while true:
+            let item = block.Next(blockIter)
+            if not option.IsSome(item):
+                break
+            let kv = option.Get(item)
+            yield (key: kv.key, value: kv.value)
+
+fn TableSize(reader: TableReader): int32 =
+    if reader == nil:
+        return 0
+    return reader.image.buffer.len
+
+fn Sections(reader: TableReader): seq[sstable_types.TableSection] =
+    if reader == nil:
+        return @[]
+    return reader.image.sections

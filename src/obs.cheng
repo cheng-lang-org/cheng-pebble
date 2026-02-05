@@ -1,0 +1,138 @@
+module pebble_obs
+
+import "./obs/types.cheng" as obs_types
+import "./obs/events.cheng" as obs_events
+import "./obs/metrics.cheng" as obs_metrics
+import "./obs/ops.cheng" as obs_ops
+import "./obs/profiling.cheng" as obs_profiling
+import "./obs/manager.cheng" as obs_manager
+
+type
+    MetricKind = obs_types.MetricKind
+    LabelPairs = obs_types.LabelPairs
+    LabelPair = obs_types.LabelPair
+    MetricDescriptor = obs_types.MetricDescriptor
+    HistogramState = obs_types.HistogramState
+    MetricPoint = obs_types.MetricPoint
+    MetricSnapshot = obs_types.MetricSnapshot
+    ObsEventKind = obs_types.ObsEventKind
+    ObsEvent = obs_types.ObsEvent
+    EventListener = obs_types.EventListener
+    RuntimeCommand = obs_types.RuntimeCommand
+    HotSwapScenario = obs_types.HotSwapScenario
+    HotSwapResult = obs_types.HotSwapResult
+    TelemetryField = obs_types.TelemetryField
+    DashboardPanel = obs_types.DashboardPanel
+    DashboardTemplate = obs_types.DashboardTemplate
+
+    EventBus = obs_events.EventBus
+    MetricsRegistry = obs_metrics.MetricsRegistry
+    OpsCenter = obs_ops.OpsCenter
+    Profiler = obs_profiling.Profiler
+    ObservabilityOptions = obs_manager.ObservabilityOptions
+    Observability = obs_manager.Observability
+
+const
+    DefaultHistogramBuckets = obs_metrics.DefaultHistogramBuckets
+
+fn NewLabelPairs(pairs: seq[LabelPair]): LabelPairs =
+    return obs_types.NewLabelPairs(pairs)
+
+fn NewEventBus(maxBuffer: int32 = 256): EventBus =
+    return obs_events.NewEventBus(maxBuffer)
+
+fn RegisterListener(bus: EventBus, listener: EventListener) =
+    obs_events.RegisterListener(bus, listener)
+
+fn Publish(bus: EventBus, event: ObsEvent) =
+    obs_events.Publish(bus, event)
+
+fn Recent(bus: EventBus, limit: int32 = 20): seq[ObsEvent] =
+    return obs_events.Recent(bus, limit)
+
+fn NewMetricsRegistry(buckets: seq[float64] = DefaultHistogramBuckets): MetricsRegistry =
+    return obs_metrics.NewMetricsRegistry(buckets)
+
+fn DeclareMetric(registry: MetricsRegistry, descriptor: MetricDescriptor) =
+    obs_metrics.DeclareMetric(registry, descriptor)
+
+fn IncCounter(registry: MetricsRegistry, name: str, help: str = "",
+              labels: seq[LabelPair] = @[], amount: float64 = 1.0) =
+    obs_metrics.IncCounter(registry, name, help, labels, amount)
+
+fn SetGauge(registry: MetricsRegistry, name: str, help: str = "",
+            labels: seq[LabelPair] = @[], value: float64 = 0.0) =
+    obs_metrics.SetGauge(registry, name, help, labels, value)
+
+fn ObserveHistogram(registry: MetricsRegistry, name: str, help: str = "",
+                    labels: seq[LabelPair] = @[], value: float64 = 0.0,
+                    buckets: seq[float64] = @[]) =
+    obs_metrics.ObserveHistogram(registry, name, help, labels, value, buckets)
+
+fn Snapshot(registry: MetricsRegistry): seq[MetricSnapshot] =
+    return obs_metrics.Snapshot(registry)
+
+fn RenderPrometheus(registry: MetricsRegistry): str =
+    return obs_metrics.RenderPrometheus(registry)
+
+fn RenderStatsd(registry: MetricsRegistry, prefix: str = ""): seq[str] =
+    return obs_metrics.RenderStatsd(registry, prefix)
+
+fn NewOpsCenter(): OpsCenter =
+    return obs_ops.NewOpsCenter()
+
+fn RegisterReloader(ops: OpsCenter, name: str, reloader: obs_ops.ConfigHotReloader) =
+    obs_ops.RegisterReloader(ops, name, reloader)
+
+fn PollReloaders(ops: OpsCenter) =
+    obs_ops.PollReloaders(ops)
+
+fn RegisterRuntimeCommand(ops: OpsCenter, name: str, help: str,
+                          handler: RuntimeCommand) =
+    obs_ops.RegisterRuntimeCommand(ops, name, help, handler)
+
+fn ExecuteRuntimeCommand(ops: OpsCenter, name: str, args: seq[str]): tuple[ok: bool, output: str] =
+    return obs_ops.ExecuteRuntimeCommand(ops, name, args)
+
+fn ListRuntimeCommands(ops: OpsCenter): seq[tuple[name: str, help: str]] =
+    return obs_ops.ListRuntimeCommands(ops)
+
+fn NewProfiler(): Profiler =
+    return obs_profiling.NewProfiler()
+
+fn RegisterSink(profiler: Profiler, sink: obs_profiling.ProfilingSink) =
+    obs_profiling.RegisterSink(profiler, sink)
+
+fn ProfileBlock(profiler: Profiler, metrics: MetricsRegistry,
+                bus: EventBus, name: str,
+                labels: seq[LabelPair] = @[], body: fn ()) =
+    obs_profiling.ProfileBlock(profiler, metrics, bus, name, labels, body)
+
+fn DefaultObservabilityOptions(): ObservabilityOptions =
+    return obs_manager.DefaultObservabilityOptions()
+
+fn NewObservability(options: ObservabilityOptions = DefaultObservabilityOptions()): Observability =
+    return obs_manager.NewObservability(options)
+
+fn PublishEvent(obs: Observability,
+                kind: ObsEventKind,
+                message: str,
+                tags: seq[LabelPair] = @[],
+                payload: str = "") =
+    obs_manager.PublishEvent(obs, kind, message, tags, payload)
+
+fn ExportPrometheus(obs: Observability): str =
+    return obs_manager.ExportPrometheus(obs)
+
+fn ExportStatsd(obs: Observability, prefix: str = ""): seq[str] =
+    return obs_manager.ExportStatsd(obs, prefix)
+
+fn AttachConfigHotReload(obs: Observability,
+                         name: str,
+                         path: str,
+                         intervalMs: int32 = 1000,
+                         callback: obs_ops.ConfigReloadCallback) =
+    obs_manager.AttachConfigHotReload(obs, name, path, intervalMs, callback)
+
+fn RunMetricSelfChecks(obs: Observability): seq[str] =
+    return obs_manager.RunMetricSelfChecks(obs)

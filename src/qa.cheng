@@ -1,0 +1,32 @@
+module pebble_qa
+
+import "./qa/dsl.cheng" as qa_dsl
+import "./qa/differ.cheng" as qa_differ
+import "./qa/metamorphic.cheng" as qa_metamorphic
+
+
+type
+    QAActionKind = qa_dsl.QAActionKind
+    QAAction = qa_dsl.QAAction
+    BatchState = qa_differ.BatchState
+    QARunnerConfig = qa_metamorphic.QARunnerConfig
+    QAIterationResult = qa_metamorphic.QAIterationResult
+    QARunResult = qa_metamorphic.QARunResult
+
+fn ParseScenario(text: str): seq[QAAction] =
+    return qa_dsl.ParseScenario(text)
+
+fn Describe(action: QAAction): str =
+    return qa_dsl.Describe(action)
+
+fn DiffStates(lhs: BatchState, rhs: BatchState): seq[str] =
+    return qa_differ.DiffStates(lhs, rhs)
+
+fn DefaultQARunnerConfig(): QARunnerConfig =
+    return qa_metamorphic.DefaultQARunnerConfig()
+
+fn RunScenario(actions: seq[QAAction], cfg: QARunnerConfig = DefaultQARunnerConfig()): QARunResult =
+    return qa_metamorphic.RunScenario(actions, cfg)
+
+fn LatestState(result: QARunResult): BatchState =
+    return qa_metamorphic.LatestState(result)

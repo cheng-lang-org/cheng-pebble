@@ -1,0 +1,171 @@
+module pebble_manifest_version_set
+
+import "../manifest/types.cheng" as man_types
+import "../manifest/version.cheng" as man_version
+import "../manifest/version_edit.cheng" as man_edit
+import "../manifest/store.cheng" as man_store
+import "../runtime/executor.cheng" as exec
+import cheng / stdlib / bootstrap / core / option as option
+
+type
+    VersionSet = ref
+        manifestPath: str
+        store: man_store.ManifestStore
+        current: man_version.Version
+        executor: exec.Executor
+        ownsExecutor: bool
+        handles: seq[exec.TaskHandle]
+        closed: bool
+        versionCounter: uint64
+        lastErrorMsg: option.Option[str]
+
+fn NewVersionSet(manifestPath: str,
+                 baseVersion: man_version.Version = nil,
+                 executor: exec.Executor = nil,
+                 createIfMissing: bool = true,
+                 formatVersion: man_store.ManifestFormatVersion = man_store.ManifestFormatV1): VersionSet =
+    var currentVersion: man_version.Version = nil
+    var counter: uint64 = 0
+    let store = man_store.InitManifestStore(manifestPath, formatVersion)
+    let records = man_store.ReadAllRecords(store)
+    if records.len > 0:
+        var i: int32 = 0
+        while i < records.len:
+            let record = records[i]
+            if record.kind == man_store.RecordSnapshot:
+                currentVersion = man_version.Clone(record.version)
+                if currentVersion == nil:
+                    raise newException(man_types.ManifestError, "manifest snapshot is nil")
+                currentVersion.id = man_types.ToVersionId(1)
+                counter = man_types.ToUint64(currentVersion.id)
+            else:
+                if currentVersion == nil:
+                    raise newException(man_types.ManifestError, "missing snapshot before edit")
+                currentVersion = man_version.ApplyEdit(currentVersion, record.edit)
+                counter = counter + uint64(1)
+                currentVersion.id = man_types.ToVersionId(counter)
+            i = i + 1
+    else:
+        if not createIfMissing and not man_store.ManifestExists(store):
+            raise newException(man_types.ManifestError, "manifest file not found: " & manifestPath)
+        if baseVersion == nil:
+            currentVersion = man_version.InitVersion()
+        else:
+            currentVersion = man_version.Clone(baseVersion)
+        counter = 1
+        currentVersion.id = man_types.ToVersionId(counter)
+    if records.len == 0:
+        man_store.WriteSnapshot(store, currentVersion)
+    var execInst = executor
+    var ownsExec: bool = false
+    if execInst == nil:
+        execInst = exec.InitExecutor(name: "manifest", mode: exec.execSynchronous)
+        ownsExec = true
+    var vs: VersionSet = new[VersionSet]()
+    if vs != nil:
+        vs.manifestPath = manifestPath
+        vs.store = store
+        vs.current = currentVersion
+        vs.executor = execInst
+        vs.ownsExecutor = ownsExec
+        vs.handles = @[]
+        vs.closed = false
+        vs.versionCounter = counter
+        vs.lastErrorMsg = option.none(str)
+    return vs
+
+fn raiseIfFault(vs: VersionSet) =
+    if vs == nil:
+        raise newException(man_types.ManifestError, "VersionSet is nil")
+    if vs.closed:
+        raise newException(man_types.ManifestError, "VersionSet is closed")
+    if option.IsSome(vs.lastErrorMsg):
+        raise newException(man_types.ManifestError, option.Get(vs.lastErrorMsg))
+
+fn pruneHandles(vs: VersionSet) =
+    if vs == nil:
+        return
+    var remaining: seq[exec.TaskHandle] = @[]
+    var i: int32 = 0
+    while i < vs.handles.len:
+        let handle = vs.handles[i]
+        if exec.IsPending(handle):
+            remaining.add(handle)
+        i = i + 1
+    vs.handles = remaining
+
+fn applyEditLocked(vs: VersionSet, edit: man_edit.VersionEdit) =
+    if man_edit.IsEmpty(edit):
+        return
+    let nextVersion = man_version.ApplyEdit(vs.current, edit)
+    man_store.AppendEdit(vs.store, edit)
+    nextVersion.id = man_types.ToVersionId(vs.versionCounter + uint64(1))
+    vs.versionCounter = man_types.ToUint64(nextVersion.id)
+    vs.current = nextVersion
+
+fn applyEditSync(vs: VersionSet, edit: man_edit.VersionEdit) =
+    if vs.closed:
+        raise newException(man_types.ManifestError, "VersionSet is closed")
+    if option.IsSome(vs.lastErrorMsg):
+        raise newException(man_types.ManifestError, option.Get(vs.lastErrorMsg))
+    applyEditLocked(vs, edit)
+
+fn recordFailure(vs: VersionSet, err: ref Exception) =
+    if vs == nil:
+        return
+    if not option.IsSome(vs.lastErrorMsg):
+        vs.lastErrorMsg = option.some(err.msg)
+
+fn SubmitEdit(vs: VersionSet, edit: man_edit.VersionEdit): exec.TaskHandle =
+    raiseIfFault(vs)
+    let captured = edit
+    let handle = exec.Submit(vs.executor, fn () =
+        applyEditSync(vs, captured)
+    )
+    pruneHandles(vs)
+    if exec.IsPending(handle):
+        vs.handles.add(handle)
+    return handle
+
+fn ApplyEdit(vs: VersionSet, edit: man_edit.VersionEdit) =
+    applyEditSync(vs, edit)
+
+fn CurrentVersion(vs: VersionSet): man_version.Version =
+    if vs == nil:
+        return nil
+    return man_version.Clone(vs.current)
+
+fn Snapshot(vs: VersionSet): man_version.Version =
+    return CurrentVersion(vs)
+
+fn Sync(vs: VersionSet) =
+    if vs == nil:
+        return
+    man_store.Sync(vs.store)
+
+fn WaitPending(vs: VersionSet) =
+    if vs == nil:
+        return
+    var handles = vs.handles
+    vs.handles = @[]
+    var i: int32 = 0
+    while i < handles.len:
+        exec.Wait(handles[i])
+        i = i + 1
+
+fn Close(vs: VersionSet) =
+    if vs == nil:
+        return
+    if vs.closed:
+        return
+    vs.closed = true
+    WaitPending(vs)
+    if vs.ownsExecutor and vs.executor != nil:
+        vs.executor = nil
+    man_store.Sync(vs.store)
+    man_store.Close(vs.store)
+
+fn ErrorMessage(vs: VersionSet): option.Option[str] =
+    if vs == nil:
+        return option.none(str)
+    return vs.lastErrorMsg

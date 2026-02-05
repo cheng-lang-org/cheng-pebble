@@ -1,0 +1,162 @@
+module pebble_batch_db
+
+import "../core/types.cheng" as core_types
+import "../mem/memtable.cheng" as memtable
+import "../mem/types.cheng" as mem_types
+import "../batch/types.cheng" as batch_types
+import "../batch/batch.cheng" as batch_module
+import "../runtime/executor.cheng" as exec
+import "../wal/writer.cheng" as wal_writer
+import cheng / stdlib / bootstrap / core / option as option
+
+
+type
+    DB = ref
+        cfg: batch_types.DBConfig
+        mem: mem_types.MemTable
+        nextSeq: uint64
+        inflight: int32
+        closed: bool
+
+fn InitDB(cfg: batch_types.DBConfig): DB =
+    var normalized = cfg
+    batch_types.EnsureMemConfig(normalized)
+    if normalized.memConfig.comparator == nil:
+        normalized.memConfig.comparator = core_types.CompareBytewise
+    let mem = memtable.InitMemTable(normalized.memConfig)
+    var db: DB = new[DB]()
+    if db != nil:
+        db.cfg = normalized
+        db.mem = mem
+        db.nextSeq = 0
+        db.inflight = 0
+        db.closed = false
+    return db
+
+fn ensureOpen(db: DB) =
+    if db == nil or db.closed:
+        raise newException(batch_types.BatchError, "database is closed")
+
+fn LatestSnapshot(db: DB): batch_types.Snapshot =
+    ensureOpen(db)
+    return batch_types.Snapshot(seq: core_types.ToSequence(db.nextSeq))
+
+fn Get(db: DB, key: core_types.Key, snapshot: batch_types.Snapshot): option.Option[str] =
+    ensureOpen(db)
+    let seq = if core_types.ToUint64(snapshot.seq) == 0: core_types.ToSequence(db.nextSeq) else: snapshot.seq
+    return memtable.Get(db.mem, key, seq)
+
+fn GetLatest(db: DB, key: core_types.Key): option.Option[str] =
+    return Get(db, key, LatestSnapshot(db))
+
+fn ApproxMemtableBytes(db: DB): int32 =
+    ensureOpen(db)
+    if db.mem == nil or db.mem.base == nil:
+        return 0
+    return db.mem.base.approxBytes
+
+fn sendNudge(handler: batch_types.BackpressureHandler,
+             reason: batch_types.BackpressureReason,
+             batch: batch_module.BatchBase,
+             memBytes: int32) =
+    if handler == nil:
+        return
+    handler(batch_types.BackpressureInfo(
+        reason: reason,
+        queuedOps: batch_module.BatchLen(batch),
+        queuedBytes: batch_module.EstimatedBytes(batch),
+        memApproxBytes: memBytes
+    ))
+
+fn isZero(opts: batch_types.WriteOptions): bool =
+    return (not opts.sync) and (not opts.disableWAL) and
+        opts.nudge == nil and opts.timeoutMs == 0 and
+        opts.priority == mem_types.MemPriorityDefault
+
+fn resolveOptions(db: DB, opts: batch_types.WriteOptions): batch_types.WriteOptions =
+    var result = opts
+    if isZero(result):
+        result = db.cfg.defaultOptions
+    if result.nudge == nil:
+        result.nudge = db.cfg.backpressure
+    if result.priority == mem_types.MemPriorityDefault:
+        result.priority = db.cfg.defaultOptions.priority
+    return result
+
+fn NewBatch(db: DB, indexed: bool = false,
+            snapshot: batch_types.Snapshot = batch_types.Snapshot(seq: core_types.ToSequence(0))): batch_module.BatchBase =
+    ensureOpen(db)
+    if indexed:
+        let snap = if core_types.ToUint64(snapshot.seq) == 0: LatestSnapshot(db) else: snapshot
+        let resolver = fn (key: core_types.Key, snap: batch_types.Snapshot): option.Option[str] =
+            return Get(db, key, snap)
+        let idx = batch_module.NewIndexedBatch(db.cfg.memConfig, resolver, snap)
+        return batch_module.Base(idx)
+    return batch_module.NewBatch(db.cfg.memConfig)
+
+fn Close(db: DB) =
+    if db == nil:
+        return
+    db.closed = true
+
+fn Commit(db: DB, batch: batch_module.BatchBase,
+          opts: batch_types.WriteOptions = batch_types.DefaultWriteOptions): core_types.SequenceNumber =
+    ensureOpen(db)
+    if batch == nil:
+        raise newException(batch_types.BatchError, "batch must not be nil")
+    if batch_module.IsCommitted(batch):
+        raise newException(batch_types.BatchError, "batch has already been committed")
+    var options = resolveOptions(db, opts)
+    if options.timeoutMs < 0:
+        raise newException(batch_types.BatchError, "timeoutMs must be >= 0")
+    if db.cfg.maxConcurrentCommits > 0 and db.inflight >= db.cfg.maxConcurrentCommits:
+        sendNudge(options.nudge, batch_types.BpMemStall, batch,
+            if db.mem != nil and db.mem.base != nil: db.mem.base.approxBytes else: 0)
+        raise newException(batch_types.BatchError, "maxConcurrentCommits limit reached")
+    db.inflight = db.inflight + 1
+    defer:
+        if db.inflight > 0:
+            db.inflight = db.inflight - 1
+    let opCount = batch_module.BatchLen(batch)
+    if db.mem == nil:
+        raise newException(batch_types.BatchError, "memtable is nil")
+    if memtable.NeedsFlush(db.mem) or memtable.ReadyForFlush(db.mem):
+        sendNudge(options.nudge, batch_types.BpMemSoftLimit, batch, db.mem.base.approxBytes)
+    if opCount > 0:
+        let estimatedBytes = batch_module.EstimatedBytes(batch)
+        let throttleDelay = memtable.AdmitWrite(db.mem, options.priority, estimatedBytes)
+        if throttleDelay > 0:
+            sendNudge(options.nudge, batch_types.BpMemStall, batch, db.mem.base.approxBytes)
+            if options.timeoutMs > 0 and throttleDelay > options.timeoutMs:
+                raise newException(batch_types.BatchError,
+                    "write admission timeout under memtable pressure")
+    if opCount == 0:
+        batch_module.MarkCommitted(batch)
+        return core_types.ToSequence(db.nextSeq)
+    let prevSeq = db.nextSeq
+    let startSeqU = prevSeq + 1
+    let startSeq = core_types.ToSequence(startSeqU)
+    let entries = batch_module.ToApplyEntries(batch, startSeq)
+    memtable.PrecheckApplyBatch(db.mem, entries)
+    let walWriter = db.cfg.walWriter
+    let walEnabled = walWriter != nil and (not options.disableWAL) and entries.len > 0
+    var walPayload = @[]
+    if walEnabled:
+        walPayload = batch_module.ToWalPayload(batch, entries)
+    if walEnabled:
+        let walResult = wal_writer.Append(walWriter, walPayload,
+            wal_writer.WalAppendOptions(requireSync: options.sync))
+        if options.sync and walResult.syncHandle != nil:
+            exec.Wait(walResult.syncHandle)
+    memtable.ApplyBatch(db.mem, entries)
+    if memtable.NeedsFlush(db.mem) or memtable.ReadyForFlush(db.mem):
+        sendNudge(options.nudge, batch_types.BpMemSoftLimit, batch, db.mem.base.approxBytes)
+    let lastSeqU = startSeqU + uint64(entries.len) - 1
+    let lastSeq = core_types.ToSequence(lastSeqU)
+    db.nextSeq = lastSeqU
+    batch_module.MarkCommitted(batch)
+    return lastSeq
+
+fn Apply(db: DB, batch: batch_module.BatchBase,
+         opts: batch_types.WriteOptions = batch_types.DefaultWriteOptions): core_types.SequenceNumber =
+    return Commit(db, batch, opts)

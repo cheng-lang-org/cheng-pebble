@@ -1,0 +1,72 @@
+module pebble_compaction
+
+import "./compaction/types.cheng" as comp_types
+import "./compaction/planner.cheng" as comp_planner
+import "./compaction/scheduler.cheng" as comp_scheduler
+import "./compaction/executor.cheng" as comp_executor
+import "./core/types.cheng" as core_types
+import "./manifest/version.cheng" as man_version
+import cheng / stdlib / bootstrap / core / option as option
+
+
+type
+    CompactionError = comp_types.CompactionError
+    CompactionPriority = comp_types.CompactionPriority
+    LevelInput = comp_types.LevelInput
+    OutputShard = comp_types.OutputShard
+    CompactionPlan = comp_types.CompactionPlan
+    CompactionPlannerConfig = comp_types.CompactionPlannerConfig
+    LevelScore = comp_types.LevelScore
+    CompactionTelemetry = comp_types.CompactionTelemetry
+    CompactionResult = comp_types.CompactionResult
+    CompactionMetrics = comp_types.CompactionMetrics
+    CompactionEventKind = comp_types.CompactionEventKind
+    CompactionEvent = comp_types.CompactionEvent
+    CompactionJobHandler = comp_types.CompactionJobHandler
+
+    CompactionPlanner = comp_planner.CompactionPlanner
+    CompactionScheduler = comp_scheduler.CompactionScheduler
+    CompactionSchedulerConfig = comp_scheduler.CompactionSchedulerConfig
+    CompactionExecutor = comp_executor.CompactionExecutor
+    CompactionInputProvider = comp_executor.CompactionInputProvider
+    CompactionOutputWriter = comp_executor.CompactionOutputWriter
+
+fn NewCompactionPlanner(cfg: CompactionPlannerConfig,
+                        comparator: core_types.Comparator = core_types.CompareBytewise): CompactionPlanner =
+    return comp_planner.NewCompactionPlanner(cfg, comparator)
+
+fn NextPlan(planner: CompactionPlanner,
+            version: man_version.Version,
+            telemetry: var CompactionTelemetry): option.Option[CompactionPlan] =
+    return comp_planner.NextPlan(planner, version, telemetry)
+
+fn InitCompactionScheduler(planner: CompactionPlanner,
+                           handler: CompactionJobHandler,
+                           cfg: CompactionSchedulerConfig): CompactionScheduler =
+    return comp_scheduler.InitCompactionScheduler(planner, handler, cfg)
+
+fn InitCompactionExecutor(provider: CompactionInputProvider,
+                          writer: CompactionOutputWriter = nil,
+                          comparator: core_types.Comparator = core_types.CompareBytewise,
+                          blockSize: int32 = 32 * 1024,
+                          bloomBitsPerKey: int32 = 10): CompactionExecutor =
+    return comp_executor.InitCompactionExecutor(provider, writer, comparator, blockSize, bloomBitsPerKey)
+
+fn ExecutePlan(exec: CompactionExecutor, plan: CompactionPlan): CompactionResult =
+    return comp_executor.ExecutePlan(exec, plan)
+
+fn Handler(exec: CompactionExecutor): CompactionJobHandler =
+    return comp_executor.Handler(exec)
+
+fn ScheduleNext(sched: CompactionScheduler,
+                version: man_version.Version): option.Option[CompactionPlan] =
+    return comp_scheduler.ScheduleNext(sched, version)
+
+fn Metrics(sched: CompactionScheduler): CompactionMetrics =
+    return comp_scheduler.Metrics(sched)
+
+fn Events(sched: CompactionScheduler): seq[CompactionEvent] =
+    return comp_scheduler.Events(sched)
+
+fn PlanResult(sched: CompactionScheduler, planId: uint64): option.Option[CompactionResult] =
+    return comp_scheduler.PlanResult(sched, planId)

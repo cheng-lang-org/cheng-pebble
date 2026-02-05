@@ -1,0 +1,9 @@
+module pebble_qa_differ
+
+import "../batch/interop.cheng" as batch_interop
+
+type
+    BatchState = batch_interop.BatchState
+
+fn DiffStates(lhs: BatchState, rhs: BatchState): seq[str] =
+    return batch_interop.DiffStates(lhs, rhs)

@@ -1,0 +1,62 @@
+module pebble_tooling_core_commands
+
+import "../config/loader.cheng" as config_loader
+import "../core/module_map.cheng" as core_module_map
+import "./cli_core.cheng" as cli_core
+import cheng / stdlib / bootstrap / tables as tables
+import cheng / stdlib / bootstrap / strings as strings
+import cheng / stdlib / bootstrap / std / strutils as strutils
+
+fn moduleMapHandler(ctx: cli_core.CliContext, args: seq[str]) =
+    ctx
+    if args.len > 0:
+        cli_core.RaiseCliError("module-map does not accept positional arguments")
+    let mapping = core_module_map.PackageMap()
+    var idx: int32 = 0
+    var key: str = ""
+    var value: str = ""
+    while tables.TableNext[str](mapping, &idx, &key, &value):
+        echo(key & " -> " & value)
+
+fn configDumpHandler(ctx: cli_core.CliContext, args: seq[str]) =
+    ctx
+    var path = ""
+    var i: int32 = 0
+    while i < args.len:
+        let arg = args[i]
+        if strutils.startsWith(arg, "--path="):
+            let parts = strutils.split(arg, '=')
+            if parts.len > 1:
+                path = parts[1]
+        elif arg == "--path":
+            cli_core.RaiseCliError("use --path=<file> to specify the config path")
+        elif strings.len(path) == 0:
+            path = arg
+        else:
+            cli_core.RaiseCliError("unexpected argument: " & arg)
+        i = i + 1
+    var cfg = config_loader.NewFlatConfig()
+    if strings.len(path) > 0:
+        cfg = config_loader.LoadConfigFile(path)
+    config_loader.ApplyEnvOverrides(cfg)
+    var idx: int32 = 0
+    var key: str = ""
+    var value: str = ""
+    while tables.TableNext[str](cfg, &idx, &key, &value):
+        echo(key & "=" & value)
+
+fn RegisterCoreCommands(root: cli_core.CliCommand) =
+    let moduleMapCmd = cli_core.NewCliCommand("module-map",
+        "list the Go package to Cheng module mapping",
+        moduleMapHandler)
+    cli_core.AddSubcommand(root, moduleMapCmd)
+
+    var details = "Flags:\n"
+    details = details & "  --path=<file>  Path to the config file to expand\n"
+    details = details & "If omitted, only default config with env overrides is printed."
+
+    let configDumpCmd = cli_core.NewCliCommand("config-dump",
+        "print flattened configuration key/value pairs",
+        configDumpHandler,
+        details)
+    cli_core.AddSubcommand(root, configDumpCmd)

@@ -1,0 +1,103 @@
+module pebble_obs_types
+
+import cheng / stdlib / bootstrap / tables as tables
+import cheng / stdlib / bootstrap / strings as strings
+import cheng / stdlib / bootstrap / std / times as times
+
+type
+    MetricKind = enum
+        MetricCounter
+        MetricGauge
+        MetricHistogram
+
+type
+    LabelPairs = tables.Table[str]
+    LabelPair = tuple[name: str, value: str]
+
+type
+    MetricDescriptor =
+        name: str
+        help: str
+        kind: MetricKind
+        labelNames: seq[str]
+        unit: str
+
+type
+    HistogramState =
+        boundaries: seq[float64]
+        counts: seq[int64]
+        sum: float64
+
+type
+    MetricPoint =
+        labels: LabelPairs
+        value: float64
+        histogram: HistogramState
+        timestamp: times.DateTime
+
+type
+    MetricSnapshot =
+        descriptor: MetricDescriptor
+        points: seq[MetricPoint]
+
+type
+    ObsEventKind = enum
+        ObsConfigReloaded
+        ObsRuntimeTuning
+        ObsProfilingSample
+        ObsMetricAnomaly
+        ObsCustom
+
+type
+    ObsEvent =
+        kind: ObsEventKind
+        timestamp: times.DateTime
+        message: str
+        tags: LabelPairs
+        payload: str
+
+type
+    EventListener = fn (event: ObsEvent)
+
+    RuntimeCommand = fn (args: seq[str]): str
+
+type
+    HotSwapScenario =
+        name: str
+        description: str
+        steps: seq[str]
+
+type
+    HotSwapResult =
+        scenario: HotSwapScenario
+        success: bool
+        details: str
+
+type
+    TelemetryField =
+        name: str
+        description: str
+        exportKey: str
+        required: bool
+
+type
+    DashboardPanel =
+        title: str
+        promQuery: str
+        unit: str
+        description: str
+
+type
+    DashboardTemplate =
+        name: str
+        panels: seq[DashboardPanel]
+
+fn NewLabelPairs(pairs: seq[LabelPair]): LabelPairs =
+    var table = tables.TableInit[str](16)
+    var i: int32 = 0
+    while i < pairs.len:
+        let pair = pairs[i]
+        if strings.len(pair[0]) > 0:
+            tables.TablePut[str](table, pair[0], pair[1])
+        i = i + 1
+    return table

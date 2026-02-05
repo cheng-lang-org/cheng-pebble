@@ -1,0 +1,62 @@
+module pebble_wal_checksum
+
+const
+    crc32cPoly = uint32(0x82F63B78)
+
+var
+    crc32cTable: array[256, uint32]
+    crcTableReady: bool = false
+
+fn initCrcTable() =
+    if crcTableReady:
+        return
+    var i: int32 = 0
+    while i < 256:
+        var crc = uint32(i)
+        var bit: int32 = 0
+        while bit < 8:
+            if (crc & uint32(1)) != 0:
+                crc = (crc shr 1) xor crc32cPoly
+            else:
+                crc = crc shr 1
+            bit = bit + 1
+        crc32cTable[i] = crc
+        i = i + 1
+    crcTableReady = true
+
+fn Extend(crc: uint32, data: openArray[uint8]): uint32 =
+    initCrcTable()
+    var c = crc xor uint32(0xFFFFFFFF)
+    for b in data:
+        let idx = (c xor uint32(b)) & uint32(0xFF)
+        c = crc32cTable[int32(idx)] xor (c shr 8)
+    return c xor uint32(0xFFFFFFFF)
+
+fn FromByte(value: uint8): array[1, uint8] =
+    return [value]
+
+fn FromUInt32(value: uint32): array[4, uint8] =
+    return [
+        uint8(value & uint32(0xFF)),
+        uint8((value shr 8) & uint32(0xFF)),
+        uint8((value shr 16) & uint32(0xFF)),
+        uint8((value shr 24) & uint32(0xFF))
+    ]
+
+fn FromUInt64(value: uint64): array[8, uint8] =
+    return [
+        uint8(value & uint64(0xFF)),
+        uint8((value shr 8) & uint64(0xFF)),
+        uint8((value shr 16) & uint64(0xFF)),
+        uint8((value shr 24) & uint64(0xFF)),
+        uint8((value shr 32) & uint64(0xFF)),
+        uint8((value shr 40) & uint64(0xFF)),
+        uint8((value shr 48) & uint64(0xFF)),
+        uint8((value shr 56) & uint64(0xFF))
+    ]
+
+fn MaskChecksum(crc: uint32): uint32 =
+    return ((crc shr 15) | (crc shl 17)) + uint32(0xA282EAD8)
+
+fn Value(data: openArray[uint8]): uint32 =
+    return MaskChecksum(Extend(uint32(0), data))

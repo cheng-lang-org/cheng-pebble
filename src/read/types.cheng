@@ -1,0 +1,66 @@
+module pebble_read_types
+
+import "../core/types.cheng" as core_types
+import cheng / stdlib / bootstrap / core / option as option
+
+type
+    ReadError =
+        of CatchableError
+
+type
+    ReadSourceKind = enum
+        ReadSourceMem
+        ReadSourceSST
+        ReadSourceCustom
+        ReadSourceBatch
+
+type
+    ReadSourceEntry =
+        key: core_types.Key
+        value: option.Option[str]
+
+type
+    ReadSource =
+        entries: seq[ReadSourceEntry]
+        priority: int32
+        kind: ReadSourceKind
+
+type
+    MaterializedEntry =
+        key: core_types.Key
+        value: str
+        sourcePriority: int32
+        sourceKind: ReadSourceKind
+
+type
+    IteratorBounds =
+        lower: option.Option[core_types.Key]
+        upper: option.Option[core_types.Key]
+
+type
+    ReadRange = IteratorBounds
+
+type
+    ReadIteratorConfig =
+        comparator: core_types.Comparator
+        bounds: IteratorBounds
+        prefix: option.Option[str]
+        segmentSize: int32
+        prefetchDistance: int32
+        maxCachedSegments: int32
+
+fn NewReadSource(entries: seq[ReadSourceEntry],
+                 priority: int32,
+                 kind: ReadSourceKind): ReadSource =
+    return ReadSource(entries: entries, priority: priority, kind: kind)
+
+fn WithBounds(lower: option.Option[core_types.Key],
+              upper: option.Option[core_types.Key]): IteratorBounds =
+    return IteratorBounds(lower: lower, upper: upper)
+
+fn NewReadRange(lower: option.Option[core_types.Key],
+                upper: option.Option[core_types.Key]): ReadRange =
+    return ReadRange(lower: lower, upper: upper)
+
+fn EmptyRange(): ReadRange =
+    return ReadRange(lower: option.none(core_types.Key), upper: option.none(core_types.Key))

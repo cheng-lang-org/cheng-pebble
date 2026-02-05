@@ -1,0 +1,266 @@
+module pebble_obs_metrics
+
+import "./types.cheng" as obs_types
+import cheng / stdlib / bootstrap / tables as tables
+import cheng / stdlib / bootstrap / strings as strings
+import cheng / stdlib / bootstrap / std / strutils as strutils
+import cheng / stdlib / bootstrap / std / times as times
+
+type
+    MetricDatum =
+        value: float64
+        histogram: obs_types.HistogramState
+        labels: obs_types.LabelPairs
+
+type
+    MetricEntry = ref
+        desc: obs_types.MetricDescriptor
+        data: tables.Table[MetricDatum]
+
+type
+    MetricsRegistry = ref
+        metrics: tables.Table[MetricEntry]
+        defaultBuckets: seq[float64]
+
+const
+    DefaultHistogramBuckets = @[0.001, 0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]
+
+fn NewMetricsRegistry(buckets: seq[float64] = DefaultHistogramBuckets): MetricsRegistry =
+    var registry: MetricsRegistry = new[MetricsRegistry]()
+    if registry != nil:
+        registry.metrics = tables.TableInit[MetricEntry](32)
+        registry.defaultBuckets = buckets
+    return registry
+
+fn labelsKey(desc: obs_types.MetricDescriptor, labels: obs_types.LabelPairs): str =
+    if desc.labelNames.len == 0:
+        return ""
+    var parts: seq[str] = @[]
+    var i: int32 = 0
+    while i < desc.labelNames.len:
+        let name = desc.labelNames[i]
+        var value: str = ""
+        if tables.TableHas[str](labels, name):
+            value = tables.TableGet[str](labels, name)
+        parts.add(name & "=" & value)
+        i = i + 1
+    return strutils.join(parts, "|")
+
+fn ensureHistogram(datum: var MetricDatum, buckets: seq[float64]) =
+    if datum.histogram.boundaries.len == 0:
+        datum.histogram.boundaries = buckets
+        datum.histogram.counts = newSeq[int64](buckets.len + 1)
+        datum.histogram.sum = 0.0
+
+fn ensureMetric(registry: MetricsRegistry, descriptor: obs_types.MetricDescriptor): MetricEntry =
+    if registry == nil:
+        return nil
+    if tables.TableHas[MetricEntry](registry.metrics, descriptor.name):
+        return tables.TableGet[MetricEntry](registry.metrics, descriptor.name)
+    var entry: MetricEntry = new[MetricEntry]()
+    if entry != nil:
+        entry.desc = descriptor
+        entry.data = tables.TableInit[MetricDatum](32)
+        tables.TablePut[MetricEntry](registry.metrics, descriptor.name, entry)
+    return entry
+
+fn DeclareMetric(registry: MetricsRegistry, descriptor: obs_types.MetricDescriptor) =
+    discard ensureMetric(registry, descriptor)
+
+fn extractLabelNames(labels: seq[obs_types.LabelPair]): seq[str] =
+    var names: seq[str] = @[]
+    var i: int32 = 0
+    while i < labels.len:
+        names.add(labels[i][0])
+        i = i + 1
+    return names
+
+fn IncCounter(registry: MetricsRegistry, name: str, help: str = "",
+              labels: seq[obs_types.LabelPair] = @[],
+              amount: float64 = 1.0) =
+    if registry == nil:
+        return
+    let descriptor = obs_types.MetricDescriptor(name: name, help: help,
+        kind: obs_types.MetricCounter,
+        labelNames: extractLabelNames(labels),
+        unit: "")
+    let entry = ensureMetric(registry, descriptor)
+    if entry == nil:
+        return
+    let labelPairs = obs_types.NewLabelPairs(labels)
+    let key = labelsKey(entry.desc, labelPairs)
+    var datum = tables.TableGet[MetricDatum](entry.data, key)
+    datum.value = datum.value + amount
+    datum.labels = labelPairs
+    datum.histogram.boundaries.setLen(0)
+    tables.TablePut[MetricDatum](entry.data, key, datum)
+
+fn SetGauge(registry: MetricsRegistry, name: str, help: str = "",
+            labels: seq[obs_types.LabelPair] = @[],
+            value: float64 = 0.0) =
+    if registry == nil:
+        return
+    let descriptor = obs_types.MetricDescriptor(name: name, help: help,
+        kind: obs_types.MetricGauge,
+        labelNames: extractLabelNames(labels),
+        unit: "")
+    let entry = ensureMetric(registry, descriptor)
+    if entry == nil:
+        return
+    let labelPairs = obs_types.NewLabelPairs(labels)
+    let key = labelsKey(entry.desc, labelPairs)
+    var datum = tables.TableGet[MetricDatum](entry.data, key)
+    datum.value = value
+    datum.labels = labelPairs
+    datum.histogram.boundaries.setLen(0)
+    tables.TablePut[MetricDatum](entry.data, key, datum)
+
+fn ObserveHistogram(registry: MetricsRegistry, name: str, help: str = "",
+                    labels: seq[obs_types.LabelPair] = @[],
+                    value: float64 = 0.0,
+                    buckets: seq[float64] = @[]) =
+    if registry == nil:
+        return
+    var effective = buckets
+    if effective.len == 0:
+        effective = registry.defaultBuckets
+    let descriptor = obs_types.MetricDescriptor(name: name, help: help,
+        kind: obs_types.MetricHistogram,
+        labelNames: extractLabelNames(labels),
+        unit: "seconds")
+    let entry = ensureMetric(registry, descriptor)
+    if entry == nil:
+        return
+    let labelPairs = obs_types.NewLabelPairs(labels)
+    let key = labelsKey(entry.desc, labelPairs)
+    var datum = tables.TableGet[MetricDatum](entry.data, key)
+    datum.labels = labelPairs
+    ensureHistogram(datum, effective)
+    datum.histogram.sum = datum.histogram.sum + value
+    var placed: bool = false
+    var i: int32 = 0
+    while i < datum.histogram.boundaries.len:
+        if value <= datum.histogram.boundaries[i]:
+            datum.histogram.counts[i] = datum.histogram.counts[i] + 1
+            placed = true
+            break
+        i = i + 1
+    if not placed:
+        let last = datum.histogram.counts.len - 1
+        datum.histogram.counts[last] = datum.histogram.counts[last] + 1
+    tables.TablePut[MetricDatum](entry.data, key, datum)
+
+fn Snapshot(registry: MetricsRegistry): seq[obs_types.MetricSnapshot] =
+    var output: seq[obs_types.MetricSnapshot] = @[]
+    if registry == nil:
+        return output
+    var idx: int32 = 0
+    var name: str = ""
+    var entry: MetricEntry = nil
+    while tables.TableNext[MetricEntry](registry.metrics, &idx, &name, &entry):
+        var snap = obs_types.MetricSnapshot(descriptor: entry.desc, points: @[])
+        var didx: int32 = 0
+        var key: str = ""
+        var datum: MetricDatum
+        while tables.TableNext[MetricDatum](entry.data, &didx, &key, &datum):
+            let point = obs_types.MetricPoint(labels: datum.labels,
+                value: datum.value,
+                histogram: datum.histogram,
+                timestamp: times.now())
+            snap.points.add(point)
+        output.add(snap)
+    return output
+
+fn escapeLabel(value: str): str =
+    var out = strutils.replace(value, "\\", "\\\\")
+    out = strutils.replace(out, "\n", "\\n")
+    out = strutils.replace(out, "\"", "\\\"")
+    return out
+
+fn int64ToStr(value: int64): str =
+    return strings.`$`(value)
+
+fn floatToStr(value: float64): str =
+    return strutils.formatFloat(value)
+
+fn renderLabels(desc: obs_types.MetricDescriptor, labels: obs_types.LabelPairs): str =
+    if desc.labelNames.len == 0:
+        return ""
+    var parts: seq[str] = @[]
+    var i: int32 = 0
+    while i < desc.labelNames.len:
+        let name = desc.labelNames[i]
+        var value: str = ""
+        if tables.TableHas[str](labels, name):
+            value = tables.TableGet[str](labels, name)
+        parts.add(name & "=\"" & escapeLabel(value) & "\"")
+        i = i + 1
+    return "{" & strutils.join(parts, ",") & "}"
+
+fn RenderPrometheus(registry: MetricsRegistry): str =
+    var lines: seq[str] = @[]
+    let snaps = Snapshot(registry)
+    var i: int32 = 0
+    while i < snaps.len:
+        let snap = snaps[i]
+        lines.add("# HELP " & snap.descriptor.name & " " & snap.descriptor.help)
+        var metricType = "gauge"
+        if snap.descriptor.kind == obs_types.MetricCounter:
+            metricType = "counter"
+        elif snap.descriptor.kind == obs_types.MetricHistogram:
+            metricType = "histogram"
+        lines.add("# TYPE " & snap.descriptor.name & " " & metricType)
+        var p: int32 = 0
+        while p < snap.points.len:
+            let point = snap.points[p]
+            let labelSuffix = renderLabels(snap.descriptor, point.labels)
+            if snap.descriptor.kind == obs_types.MetricHistogram:
+                var cumulative: int64 = 0
+                var b: int32 = 0
+                while b < point.histogram.boundaries.len:
+                    cumulative = cumulative + point.histogram.counts[b]
+                    var bucketLabels = labelSuffix
+                    var leLabel = ""
+                    if strings.len(labelSuffix) == 0:
+                        leLabel = "{le=\"" & floatToStr(point.histogram.boundaries[b]) & "\"}"
+                    else:
+                        leLabel = labelSuffix[0..strings.len(labelSuffix) - 2] &
+                            ",le=\"" & floatToStr(point.histogram.boundaries[b]) & "\"}"
+                    lines.add(snap.descriptor.name & "_bucket" & leLabel & " " & int64ToStr(cumulative))
+                    b = b + 1
+                cumulative = cumulative + point.histogram.counts[point.histogram.counts.len - 1]
+                var infLabel = ""
+                if strings.len(labelSuffix) == 0:
+                    infLabel = "{le=\"+Inf\"}"
+                else:
+                    infLabel = labelSuffix[0..strings.len(labelSuffix) - 2] & ",le=\"+Inf\"}"
+                lines.add(snap.descriptor.name & "_bucket" & infLabel & " " & int64ToStr(cumulative))
+                lines.add(snap.descriptor.name & "_sum" & labelSuffix & " " & floatToStr(point.histogram.sum))
+                lines.add(snap.descriptor.name & "_count" & labelSuffix & " " & int64ToStr(cumulative))
+            else:
+                lines.add(snap.descriptor.name & labelSuffix & " " & floatToStr(point.value))
+            p = p + 1
+        i = i + 1
+    return strutils.join(lines, "\n")
+
+fn RenderStatsd(registry: MetricsRegistry, prefix: str = ""): seq[str] =
+    var out: seq[str] = @[]
+    let snaps = Snapshot(registry)
+    var i: int32 = 0
+    while i < snaps.len:
+        let snap = snaps[i]
+        var metricName = snap.descriptor.name
+        if strings.len(prefix) > 0:
+            metricName = prefix & "." & metricName
+        var p: int32 = 0
+        while p < snap.points.len:
+            let point = snap.points[p]
+            if snap.descriptor.kind == obs_types.MetricCounter:
+                out.add(metricName & ":" & floatToStr(point.value) & "|c")
+            elif snap.descriptor.kind == obs_types.MetricGauge:
+                out.add(metricName & ":" & floatToStr(point.value) & "|g")
+            else:
+                out.add(metricName & ":" & floatToStr(point.histogram.sum) & "|ms")
+            p = p + 1
+        i = i + 1
+    return out

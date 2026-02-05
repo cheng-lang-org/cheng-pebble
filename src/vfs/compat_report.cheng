@@ -1,0 +1,85 @@
+module pebble_vfs_compat_report
+
+import cheng / stdlib / bootstrap / std / os as os
+import cheng / stdlib / bootstrap / std / strutils as strutils
+import cheng / stdlib / bootstrap / strings as strings
+import cheng / stdlib / bootstrap / std / times as times
+
+
+type
+    GapStatus = enum
+        StatusAligned
+        StatusPartial
+        StatusMissing
+
+type
+    VfsSemanticGap =
+        area: str
+        goBehavior: str
+        chengBehavior: str
+        mitigation: str
+        status: GapStatus
+
+fn statusLabel(status: GapStatus): str =
+    if status == StatusAligned:
+        return "aligned"
+    if status == StatusPartial:
+        return "partial"
+    return "missing"
+
+fn DefaultGaps(): seq[VfsSemanticGap] =
+    return @[
+        VfsSemanticGap(
+            area: "MemFS",
+            goBehavior: "vfs.NewMem provides in-memory FS used by crash tests",
+            chengBehavior: "Cheng stack currently uses POSIX and mount wrappers only",
+            mitigation: "mount tmpfs/ramdisk for tests or copy to temp dir",
+            status: StatusMissing
+        ),
+        VfsSemanticGap(
+            area: "Disk health / ENOSPC simulation",
+            goBehavior: "Go includes disk health/full injection wrappers",
+            chengBehavior: "FaultInjector exists but no disk-full watermarks",
+            mitigation: "combine FaultInjector with external disk pressure",
+            status: StatusPartial
+        ),
+        VfsSemanticGap(
+            area: "OpenOption decorators",
+            goBehavior: "Go supports Syncing/Logging FS options",
+            chengBehavior: "OpenOption hooks not implemented yet",
+            mitigation: "extend FileSystem wrappers when needed",
+            status: StatusPartial
+        ),
+        VfsSemanticGap(
+            area: "Testdata reuse",
+            goBehavior: "Go vfs tests reuse shared testdata",
+            chengBehavior: "MountFileSystem supports mapping testdata dirs",
+            mitigation: "use mount points to reuse Go testdata",
+            status: StatusAligned
+        )
+    ]
+
+fn ToMarkdown(gaps: seq[VfsSemanticGap],
+              timestamp: times.DateTime = times.now()): str =
+    var lines: seq[str] = @[]
+    lines.add("# Cheng VFS semantic gaps")
+    lines.add("")
+    lines.add("| Area | Go behavior | Cheng behavior | Mitigation | Status |")
+    lines.add("| --- | --- | --- | --- | --- |")
+    var i: int32 = 0
+    while i < gaps.len:
+        let gap = gaps[i]
+        lines.add("| " & gap.area & " | " & gap.goBehavior & " | " &
+            gap.chengBehavior & " | " & gap.mitigation & " | " &
+            statusLabel(gap.status) & " |")
+        i = i + 1
+    lines.add("")
+    lines.add("Last updated: " & times.format(timestamp, "yyyy-MM-dd HH:mm:ss"))
+    return strutils.join(lines, "\n")
+
+fn WriteCompatibilityReport(target: str, gaps: seq[VfsSemanticGap] = DefaultGaps()) =
+    let content = ToMarkdown(gaps)
+    let dir = os.parentDir(target)
+    if strings.len(dir) > 0:
+        os.createDir(dir)
+    os.writeFile(target, content & "\n")

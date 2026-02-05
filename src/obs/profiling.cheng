@@ -1,0 +1,65 @@
+module pebble_obs_profiling
+
+import "./events.cheng" as obs_events
+import "./metrics.cheng" as obs_metrics
+import "./types.cheng" as obs_types
+import cheng / stdlib / bootstrap / std / times as times
+import cheng / stdlib / bootstrap / strings as strings
+
+
+type
+    ProfilingSink = fn (name: str, durationSeconds: float64)
+
+    Profiler = ref
+        enabled: bool
+        sinks: seq[ProfilingSink]
+
+fn NewProfiler(): Profiler =
+    var profiler: Profiler = new[Profiler]()
+    if profiler != nil:
+        profiler.enabled = true
+        profiler.sinks = @[]
+    return profiler
+
+fn RegisterSink(profiler: Profiler, sink: ProfilingSink) =
+    if profiler == nil or sink == nil:
+        return
+    profiler.sinks.add(sink)
+
+fn notifySinks(profiler: Profiler, name: str, duration: float64) =
+    if profiler == nil:
+        return
+    var i: int32 = 0
+    while i < profiler.sinks.len:
+        let sink = profiler.sinks[i]
+        if sink != nil:
+            sink(name, duration)
+        i = i + 1
+
+fn ProfileBlock(profiler: Profiler,
+                metrics: obs_metrics.MetricsRegistry,
+                bus: obs_events.EventBus,
+                name: str,
+                labels: seq[obs_types.LabelPair] = @[],
+                body: fn ()) =
+    if profiler == nil or not profiler.enabled or body == nil:
+        if body != nil:
+            body()
+        return
+    let start = times.epochTime()
+    body()
+    let elapsed = times.epochTime() - start
+    if metrics != nil:
+        obs_metrics.ObserveHistogram(metrics, "pebble_profile_seconds",
+            "Profiling duration", labels, elapsed)
+    if bus != nil:
+        let msg = "profiling block '" & name & "' completed"
+        let event = obs_types.ObsEvent(
+            kind: obs_types.ObsProfilingSample,
+            timestamp: times.now(),
+            message: msg,
+            tags: obs_types.NewLabelPairs(labels),
+            payload: "duration_seconds=" & strings.`$`(elapsed)
+        )
+        obs_events.Publish(bus, event)
+    notifySinks(profiler, name, elapsed)

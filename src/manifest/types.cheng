@@ -1,0 +1,75 @@
+module pebble_manifest_types
+
+import "../core/types.cheng" as core_types
+import cheng / stdlib / bootstrap / strings as strings
+
+type
+    ManifestError =
+        of CatchableError
+
+type
+    VersionId = uint64
+    FileNumber = uint64
+    Level = int32
+
+type
+    FileMetadata =
+        fileNum: FileNumber
+        sizeBytes: uint64
+        smallest: core_types.Key
+        largest: core_types.Key
+        smallestSeq: core_types.SequenceNumber
+        largestSeq: core_types.SequenceNumber
+
+type
+    FileReference =
+        level: Level
+        fileNum: FileNumber
+
+fn ToVersionId(value: uint64): VersionId =
+    return value
+
+fn ToUint64(id: VersionId): uint64 =
+    return id
+
+fn IncVersionId(id: var VersionId) =
+    id = id + uint64(1)
+
+fn ToFileNumber(value: uint64): FileNumber =
+    return value
+
+fn FileNumberToUint64(value: FileNumber): uint64 =
+    return value
+
+fn FileNumberLess(a: FileNumber, b: FileNumber): bool =
+    return a < b
+
+fn FileNumberEq(a: FileNumber, b: FileNumber): bool =
+    return a == b
+
+fn Overlaps(a: FileMetadata, b: FileMetadata): bool =
+    let aSmall = core_types.ToBytes(a.smallest)
+    let aLarge = core_types.ToBytes(a.largest)
+    let bSmall = core_types.ToBytes(b.smallest)
+    let bLarge = core_types.ToBytes(b.largest)
+    let aBefore = core_types.CompareBytewise(aLarge, bSmall) < 0
+    let bBefore = core_types.CompareBytewise(bLarge, aSmall) < 0
+    return not (aBefore or bBefore)
+
+fn Describe(meta: FileMetadata): str =
+    let fileNumStr = strings.`$`(meta.fileNum)
+    let sizeStr = strings.`$`(meta.sizeBytes)
+    let minKey = core_types.ToBytes(meta.smallest)
+    let maxKey = core_types.ToBytes(meta.largest)
+    let minSeq = strings.`$`(core_types.ToUint64(meta.smallestSeq))
+    let maxSeq = strings.`$`(core_types.ToUint64(meta.largestSeq))
+    return "file=" & fileNumStr & ",size=" & sizeStr &
+        ",keys=[" & minKey & ".." & maxKey & "],seq=[" & minSeq & ".." & maxSeq & "]"
+
+fn ValidateRange(meta: FileMetadata) =
+    let smallest = core_types.ToBytes(meta.smallest)
+    let largest = core_types.ToBytes(meta.largest)
+    if strings.len(smallest) == 0 or strings.len(largest) == 0:
+        raise newException(ManifestError, "file key range cannot be empty")
+    if core_types.CompareBytewise(meta.largest, meta.smallest) < 0:
+        raise newException(ManifestError, "largest key is smaller than smallest key")

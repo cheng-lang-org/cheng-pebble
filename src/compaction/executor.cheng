@@ -1,0 +1,184 @@
+module pebble_compaction_executor
+
+import "./types.cheng" as comp_types
+import "../core/types.cheng" as core_types
+import "../manifest/types.cheng" as man_types
+import "../sstable/table_reader.cheng" as table_reader
+import "../sstable/table_builder.cheng" as table_builder
+import "../sstable/types.cheng" as sstable_types
+import cheng / stdlib / bootstrap / std / times as times
+
+
+type
+    CompactionEntry =
+        key: core_types.Key
+        value: str
+        sourceOrder: int32
+
+    CompactionInputProvider = fn (plan: comp_types.CompactionPlan): seq[table_reader.TableReader]
+    CompactionOutputWriter = fn (plan: comp_types.CompactionPlan,
+                                 artifacts: sstable_types.TableBuildArtifacts): man_types.FileMetadata
+
+    CompactionExecutor = ref
+        provider: CompactionInputProvider
+        writer: CompactionOutputWriter
+        comparator: core_types.Comparator
+        blockSize: int32
+        bloomBitsPerKey: int32
+        nextFileNum: uint64
+
+fn ensureComparator(comp: core_types.Comparator): core_types.Comparator =
+    if comp == nil:
+        return core_types.CompareBytewise
+    return comp
+
+fn InitCompactionExecutor(provider: CompactionInputProvider,
+                          writer: CompactionOutputWriter = nil,
+                          comparator: core_types.Comparator = core_types.CompareBytewise,
+                          blockSize: int32 = 32 * 1024,
+                          bloomBitsPerKey: int32 = 10): CompactionExecutor =
+    var exec: CompactionExecutor = new[CompactionExecutor]()
+    if exec != nil:
+        exec.provider = provider
+        exec.writer = writer
+        exec.comparator = ensureComparator(comparator)
+        exec.blockSize = blockSize
+        exec.bloomBitsPerKey = bloomBitsPerKey
+        exec.nextFileNum = uint64(1)
+    return exec
+
+fn sortEntries(entries: var seq[CompactionEntry], comparator: core_types.Comparator) =
+    if entries.len <= 1:
+        return
+    var i: int32 = 0
+    while i < entries.len:
+        var j: int32 = i + 1
+        while j < entries.len:
+            if comparator(entries[j].key, entries[i].key) < 0:
+                let tmp = entries[i]
+                entries[i] = entries[j]
+                entries[j] = tmp
+            j = j + 1
+        i = i + 1
+
+fn dedupEntries(entries: seq[CompactionEntry],
+                comparator: core_types.Comparator): seq[CompactionEntry] =
+    if entries.len == 0:
+        return @[]
+    var out: seq[CompactionEntry] = @[]
+    var i: int32 = 0
+    while i < entries.len:
+        let entry = entries[i]
+        if out.len == 0:
+            out.add(entry)
+        else:
+            let last = out.len - 1
+            if comparator(out[last].key, entry.key) == 0:
+                if entry.sourceOrder < out[last].sourceOrder:
+                    out[last] = entry
+            else:
+                out.add(entry)
+        i = i + 1
+    return out
+
+fn collectEntries(readers: seq[table_reader.TableReader]): seq[CompactionEntry] =
+    var out: seq[CompactionEntry] = @[]
+    var i: int32 = 0
+    while i < readers.len:
+        let reader = readers[i]
+        if reader != nil:
+            for kv in table_reader.Scan(reader):
+                out.add(CompactionEntry(key: kv.key, value: kv.value, sourceOrder: i))
+        i = i + 1
+    return out
+
+fn bytesRead(readers: seq[table_reader.TableReader]): int64 =
+    var total: int64 = 0
+    var i: int32 = 0
+    while i < readers.len:
+        let reader = readers[i]
+        if reader != nil:
+            total = total + int64(table_reader.TableSize(reader))
+        i = i + 1
+    return total
+
+fn nextFileNumber(exec: CompactionExecutor): man_types.FileNumber =
+    if exec == nil:
+        return man_types.ToFileNumber(uint64(1))
+    let value = exec.nextFileNum
+    exec.nextFileNum = exec.nextFileNum + uint64(1)
+    return man_types.ToFileNumber(value)
+
+fn buildMetadata(exec: CompactionExecutor,
+                 entries: seq[CompactionEntry],
+                 artifacts: sstable_types.TableBuildArtifacts): man_types.FileMetadata =
+    var smallest = core_types.ToKey("")
+    var largest = core_types.ToKey("")
+    if entries.len > 0:
+        smallest = entries[0].key
+        largest = entries[entries.len - 1].key
+    let fileNum = nextFileNumber(exec)
+    let sizeBytes = uint64(artifacts.image.buffer.len)
+    return man_types.FileMetadata(
+        fileNum: fileNum,
+        sizeBytes: sizeBytes,
+        smallest: smallest,
+        largest: largest,
+        smallestSeq: core_types.ToSequence(0),
+        largestSeq: core_types.ToSequence(0)
+    )
+
+fn BuildArtifacts(exec: CompactionExecutor,
+                  entries: seq[CompactionEntry]): sstable_types.TableBuildArtifacts =
+    var builder = table_builder.InitTableBuilder(exec.comparator, exec.blockSize,
+        exec.bloomBitsPerKey, true)
+    var i: int32 = 0
+    while i < entries.len:
+        let entry = entries[i]
+        table_builder.Add(builder, entry.key, entry.value)
+        i = i + 1
+    return table_builder.Finish(builder)
+
+fn ExecutePlan(exec: CompactionExecutor,
+              plan: comp_types.CompactionPlan): comp_types.CompactionResult =
+    if exec == nil:
+        raise newException(comp_types.CompactionError, "compaction executor is nil")
+    if exec.provider == nil:
+        raise newException(comp_types.CompactionError, "compaction input provider is nil")
+    let start = times.epochTime()
+    let readers = exec.provider(plan)
+    var entries = collectEntries(readers)
+    if entries.len > 1:
+        sortEntries(entries, exec.comparator)
+    let deduped = dedupEntries(entries, exec.comparator)
+    if deduped.len == 0:
+        return comp_types.CompactionResult(
+            bytesRead: bytesRead(readers),
+            bytesWritten: 0,
+            readAmp: 0.0,
+            durationMs: int32((times.epochTime() - start) * 1000.0),
+            outputFiles: @[]
+        )
+    let artifacts = BuildArtifacts(exec, deduped)
+    var metadata: man_types.FileMetadata
+    if exec.writer != nil:
+        metadata = exec.writer(plan, artifacts)
+    else:
+        metadata = buildMetadata(exec, deduped, artifacts)
+    let duration = times.epochTime() - start
+    let readBytes = bytesRead(readers)
+    let written = int64(artifacts.image.buffer.len)
+    var readAmp: float64 = 0.0
+    if written > 0:
+        readAmp = readBytes.float / written.float
+    return comp_types.CompactionResult(
+        bytesRead: readBytes,
+        bytesWritten: written,
+        readAmp: readAmp,
+        durationMs: int32(duration * 1000.0),
+        outputFiles: @[metadata]
+    )
+
+fn Handler(exec: CompactionExecutor): comp_types.CompactionJobHandler =
+    return fn (plan: comp_types.CompactionPlan): comp_types.CompactionResult =
+        return ExecutePlan(exec, plan)
