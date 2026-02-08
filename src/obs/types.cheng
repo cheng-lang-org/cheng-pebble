@@ -1,8 +1,8 @@
 module pebble_obs_types
 
-import cheng / stdlib / bootstrap / tables as tables
-import cheng / stdlib / bootstrap / strings as strings
-import cheng / stdlib / bootstrap / std / times as times
+import std/tables as tables
+import std/strings as strings
+import std/std/times as times
 
 type
     MetricKind = enum
@@ -12,7 +12,7 @@ type
 
 type
     LabelPairs = tables.Table[str]
-    LabelPair = tuple[name: str, value: str]
+    LabelPair = tuple(name: str, value: str)
 
 type
     MetricDescriptor =
@@ -57,9 +57,9 @@ type
         payload: str
 
 type
-    EventListener = fn (event: ObsEvent)
+    EventListener = fn(event: ObsEvent)
 
-    RuntimeCommand = fn (args: seq[str]): str
+    RuntimeCommand = fn(args: seq[str]): str
 
 type
     HotSwapScenario =

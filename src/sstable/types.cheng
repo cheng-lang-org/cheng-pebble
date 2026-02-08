@@ -1,8 +1,8 @@
 module pebble_sstable_types
 
-import "../core/types.cheng" as core_types
-import cheng / stdlib / bootstrap / core / option as option
-import cheng / stdlib / bootstrap / strings as strings
+import cheng/pebble/core/types as core_types
+import std/option as option
+import std/strings as strings
 
 type
     SSTError =
@@ -73,14 +73,14 @@ fn InitBlockHandle(offset: int32, length: int32): BlockHandle =
     return BlockHandle(offset: offset, length: length)
 
 fn Describe(handle: BlockHandle): str =
-    return "offset=" & strings.`$`(handle.offset) & ",length=" & strings.`$`(handle.length)
+    return "offset=" & toString(handle.offset) & ",length=" & toString(handle.length)
 
 fn MergeProperties(into: var TableProperties, other: TableProperties) =
     into.numEntries = into.numEntries + other.numEntries
     into.rawKeySize = into.rawKeySize + other.rawKeySize
     into.rawValueSize = into.rawValueSize + other.rawValueSize
     if option.IsSome(other.smallestKey):
-        if not option.IsSome(into.smallestKey):
+        if ! option.IsSome(into.smallestKey):
             into.smallestKey = other.smallestKey
         else:
             let currentKey = option.Get(into.smallestKey)
@@ -88,7 +88,7 @@ fn MergeProperties(into: var TableProperties, other: TableProperties) =
             if core_types.CompareBytewise(currentKey, otherKey) > 0:
                 into.smallestKey = other.smallestKey
     if option.IsSome(other.largestKey):
-        if not option.IsSome(into.largestKey):
+        if ! option.IsSome(into.largestKey):
             into.largestKey = other.largestKey
         else:
             let currentKey = option.Get(into.largestKey)

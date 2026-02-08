@@ -1,6 +1,6 @@
 module pebble_wal_recycler
 
-import cheng / stdlib / bootstrap / core / option as option
+import std/option as option
 
 type
     RecyclableFile =
@@ -25,7 +25,7 @@ fn Len(recycler: LogRecycler): int32 =
     return recycler.pool.len
 
 fn Acquire(recycler: LogRecycler): option.Option[RecyclableFile] =
-    if recycler == nil or recycler.maxPool == 0:
+    if recycler == nil || recycler.maxPool == 0:
         return option.none(RecyclableFile)
     if recycler.pool.len == 0:
         return option.none(RecyclableFile)
@@ -35,7 +35,7 @@ fn Acquire(recycler: LogRecycler): option.Option[RecyclableFile] =
     return option.some(file)
 
 fn Recycle(recycler: LogRecycler, file: RecyclableFile) =
-    if recycler == nil or recycler.maxPool == 0:
+    if recycler == nil || recycler.maxPool == 0:
         return
     if recycler.pool.len >= recycler.maxPool:
         recycler.pool.delete(0)

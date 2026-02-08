@@ -1,9 +1,9 @@
 module pebble_compaction_types
 
-import "../core/types.cheng" as core_types
-import "../manifest/types.cheng" as man_types
-import cheng / stdlib / bootstrap / core / option as option
-import cheng / stdlib / bootstrap / std / times as times
+import cheng/pebble/core/types as core_types
+import cheng/pebble/manifest/types as man_types
+import std/option as option
+import std/std/times as times
 
 
 type
@@ -95,7 +95,7 @@ type
         payload: str
 
 type
-    CompactionJobHandler = fn (plan: CompactionPlan): CompactionResult
+    CompactionJobHandler = fn(plan: CompactionPlan): CompactionResult
 
 fn InitLevelInput(level: man_types.Level,
                   files: seq[man_types.FileMetadata]): LevelInput =

@@ -1,11 +1,11 @@
 module pebble_read_trace
 
-import "../core/types.cheng" as core_types
-import "../read/types.cheng" as read_types
-import "../read/iterators.cheng" as read_iter
-import cheng / stdlib / bootstrap / core / option as option
-import cheng / stdlib / bootstrap / strings as strings
-import cheng / stdlib / bootstrap / std / strutils as strutils
+import cheng/pebble/core/types as core_types
+import cheng/pebble/read/types as read_types
+import cheng/pebble/read/iterators as read_iter
+import std/option as option
+import std/strings as strings
+import std/std/strutils as strutils
 
 
 type
@@ -102,12 +102,12 @@ fn CaptureState(it: read_iter.ReadIterator): ReadTraceState =
     return state
 
 fn ensureKey(op: ReadTraceOp): str =
-    if not option.IsSome(op.key):
+    if ! option.IsSome(op.key):
         raise newException(ValueError, opName(op.kind) & " requires key")
     return option.Get(op.key)
 
 fn ensurePrefix(op: ReadTraceOp): str =
-    if not option.IsSome(op.prefix):
+    if ! option.IsSome(op.prefix):
         raise newException(ValueError, opName(op.kind) & " requires prefix")
     return option.Get(op.prefix)
 
@@ -118,7 +118,7 @@ fn toKeyOption(value: option.Option[str]): option.Option[core_types.Key] =
 
 fn ApplyOp(it: read_iter.ReadIterator, op: ReadTraceOp): ReadTraceStep =
     var ok: bool = true
-    var rangeEntries: seq[RangeTraceEntry] = @[]
+    var rangeEntries: seq[RangeTraceEntry]
     if op.kind == TraceOpFirst:
         ok = read_iter.First(it)
     elif op.kind == TraceOpLast:
@@ -145,10 +145,11 @@ fn ApplyOp(it: read_iter.ReadIterator, op: ReadTraceOp): ReadTraceStep =
     else:
         let lower = toKeyOption(op.lower)
         let upper = toKeyOption(op.upper)
-        let range = if option.IsSome(lower) or option.IsSome(upper):
-            read_types.NewReadRange(lower, upper)
+        var range: read_types.IteratorBounds
+        if option.IsSome(lower) || option.IsSome(upper):
+            range = read_types.NewReadRange(lower, upper)
         else:
-            read_types.EmptyRange()
+            range = read_types.EmptyRange()
         for entry in read_iter.Range(it, range, op.prefix):
             rangeEntries.add(RangeTraceEntry(
                 key: core_types.ToBytes(entry.key),
@@ -180,28 +181,28 @@ fn TraceIterator(it: read_iter.ReadIterator,
     return trace
 
 fn formatState(state: ReadTraceState): str =
-    var parts: seq[str] = @[]
-    parts.add("count=" & strings.`$`(state.count))
-    parts.add("valid=" & strings.`$`(state.valid))
+    var parts: seq[str]
+    parts.add("count=" & toString(state.count))
+    parts.add("valid=" & toString(state.valid))
     if option.IsSome(state.key):
         parts.add("key=" & option.Get(state.key))
     if option.IsSome(state.value):
         parts.add("value=" & option.Get(state.value))
     if option.IsSome(state.sourcePriority):
-        parts.add("priority=" & strings.`$`(option.Get(state.sourcePriority)))
+        parts.add("priority=" & toString(option.Get(state.sourcePriority)))
     if option.IsSome(state.sourceKind):
-        parts.add("source=" & strings.`$`(int32(option.Get(state.sourceKind))))
+        parts.add("source=" & toString(int32(option.Get(state.sourceKind))))
     return strutils.join(parts, " ")
 
 fn TraceToLines(trace: ReadTrace): seq[str] =
-    var lines: seq[str] = @[]
+    var lines: seq[str]
     lines.add("init " & formatState(trace.initialState))
     var i: int32 = 0
     while i < trace.steps.len:
         let step = trace.steps[i]
-        var line = opName(step.op) & " ok=" & strings.`$`(step.ok) & " " & formatState(step.state)
+        var line = opName(step.op) & " ok=" & toString(step.ok) & " " & formatState(step.state)
         if step.op == TraceOpRange:
-            line = line & " range=" & strings.`$`(step.rangeEntries.len)
+            line = line & " range=" & toString(step.rangeEntries.len)
         lines.add(line)
         i = i + 1
     return lines
@@ -209,14 +210,14 @@ fn TraceToLines(trace: ReadTrace): seq[str] =
 fn DiffTraces(lhs: ReadTrace, rhs: ReadTrace): seq[str] =
     let leftLines = TraceToLines(lhs)
     let rightLines = TraceToLines(rhs)
-    var diffs: seq[str] = @[]
+    var diffs: seq[str]
     if leftLines.len != rightLines.len:
-        diffs.add("trace length differs: lhs=" & strings.`$`(leftLines.len) &
-            " rhs=" & strings.`$`(rightLines.len))
+        diffs.add("trace length differs: lhs=" & toString(leftLines.len) &
+            " rhs=" & toString(rightLines.len))
     let limit = if leftLines.len < rightLines.len: leftLines.len else: rightLines.len
     var i: int32 = 0
     while i < limit:
         if leftLines[i] != rightLines[i]:
-            diffs.add("step " & strings.`$`(i) & " lhs='" & leftLines[i] & "' rhs='" & rightLines[i] & "'")
+            diffs.add("step " & toString(i) & " lhs='" & leftLines[i] & "' rhs='" & rightLines[i] & "'")
         i = i + 1
     return diffs

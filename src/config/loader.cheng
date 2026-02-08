@@ -1,9 +1,9 @@
 module pebble_config_loader
 
-import cheng / stdlib / bootstrap / strings as strings
-import cheng / stdlib / bootstrap / std / os as os
-import cheng / stdlib / bootstrap / std / strutils as strutils
-import cheng / stdlib / bootstrap / tables as tables
+import std/strings as strings
+import std/os as os
+import std/std/strutils as strutils
+import std/tables as tables
 
 type
     ConfigError =
@@ -20,13 +20,13 @@ fn findSeparator(line: str): int32 =
     let n: int32 = strings.len(line)
     while i < n:
         let ch = line[i]
-        if ch == '=' or ch == ':':
+        if ch == '=' || ch == ':':
             return i
         i = i + 1
     return -1
 
 fn LoadConfigFile(path: str): FlatConfig =
-    if not os.fileExists(path):
+    if ! os.fileExists(path):
         raise newException(ConfigError, "config file not found: " & path)
     let content = os.readFile(path)
     let lines = strutils.split(content, '\n')
@@ -65,7 +65,7 @@ fn RegisterDefaults(base: var FlatConfig, defaults: FlatConfig) =
     var key: str = ""
     var value: str = ""
     while tables.TableNext[str](defaults, &idx, &key, &value):
-        if not tables.TableHas[str](base, key):
+        if ! tables.TableHas[str](base, key):
             tables.TablePut[str](base, key, value)
 
 fn envKeyForConfig(key: str, prefix: str): str =
@@ -95,10 +95,10 @@ fn Require(cfg: FlatConfig, key: str): str =
     raise newException(ConfigError, "missing required config key: " & key)
 
 fn ToBool(cfg: FlatConfig, key: str, fallback: bool = false): bool =
-    if not tables.TableHas[str](cfg, key):
+    if ! tables.TableHas[str](cfg, key):
         return fallback
     let value = strutils.toLowerAscii(tables.TableGet[str](cfg, key))
-    if value == "1" or value == "true" or value == "yes" or value == "on":
+    if value == "1" || value == "true" || value == "yes" || value == "on":
         return true
     return false
 
@@ -116,34 +116,34 @@ fn parseFloat(value: str): float64 =
     var hadDigit: bool = false
     while i < strings.len(value):
         let ch = value[i]
-        if ch < '0' or ch > '9':
+        if ch < '0' || ch > '9':
             break
         hadDigit = true
         intPart = intPart * 10 + int64(ord(ch) - ord('0'))
         i = i + 1
     var frac: float64 = 0.0
     var denom: float64 = 1.0
-    if i < strings.len(value) and value[i] == '.':
+    if i < strings.len(value) && value[i] == '.':
         i = i + 1
         while i < strings.len(value):
             let ch = value[i]
-            if ch < '0' or ch > '9':
+            if ch < '0' || ch > '9':
                 break
             denom = denom * 10.0
             frac = frac + float64(ord(ch) - ord('0')) / denom
             i = i + 1
-    if not hadDigit and frac == 0.0:
+    if ! hadDigit && frac == 0.0:
         return 0.0
     return sign * (float64(intPart) + frac)
 
 fn ToInt(cfg: FlatConfig, key: str, fallback: int32 = 0): int32 =
-    if not tables.TableHas[str](cfg, key):
+    if ! tables.TableHas[str](cfg, key):
         return fallback
     let raw = tables.TableGet[str](cfg, key)
     return int32(strutils.parseInt(raw))
 
 fn ToFloat(cfg: FlatConfig, key: str, fallback: float64 = 0.0): float64 =
-    if not tables.TableHas[str](cfg, key):
+    if ! tables.TableHas[str](cfg, key):
         return fallback
     let raw = tables.TableGet[str](cfg, key)
     return parseFloat(raw)

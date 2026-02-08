@@ -1,14 +1,14 @@
 module pebble_sstable_table_reader
 
-import "../core/types.cheng" as core_types
-import "../sstable/types.cheng" as sstable_types
-import "../sstable/encoding.cheng" as enc
-import "../sstable/block.cheng" as block
-import "../sstable/filter.cheng" as filter
-import "../sstable/cache.cheng" as cache
-import cheng / stdlib / bootstrap / core / option as option
-import cheng / stdlib / bootstrap / strings as strings
-import cheng / stdlib / bootstrap / std / strutils as strutils
+import cheng/pebble/core/types as core_types
+import cheng/pebble/sstable/types as sstable_types
+import cheng/pebble/sstable/encoding as enc
+import cheng/pebble/sstable/block as block
+import cheng/pebble/sstable/filter as filter
+import cheng/pebble/sstable/cache as cache
+import std/option as option
+import std/strings as strings
+import std/std/strutils as strutils
 
 const
     FooterMagic = "SSTN"
@@ -24,19 +24,21 @@ type
         cache: cache.BlockCache
         cacheNamespace: str
 
+    ScanItem = tuple(key: core_types.Key, value: str)
+
 var readerIdCounter: int32 = 0
 
 fn nextReaderNamespace(): str =
     readerIdCounter = readerIdCounter + 1
-    return "sst-reader-" & strings.`$`(readerIdCounter)
+    return "sst-reader-" & toString(readerIdCounter)
 
 fn cacheKey(reader: TableReader, handle: sstable_types.BlockHandle): str =
-    return reader.cacheNamespace & ":" & strings.`$`(handle.offset) & ":" & strings.`$`(handle.length)
+    return reader.cacheNamespace & ":" & toString(handle.offset) & ":" & toString(handle.length)
 
 fn validateHandle(totalLen: int32, handle: sstable_types.BlockHandle, label: str) =
-    if handle.offset < 0 or handle.length < 0:
+    if handle.offset < 0 || handle.length < 0:
         raise newException(sstable_types.SSTError, label & " handle has negative values")
-    if handle.offset > totalLen or handle.length > totalLen:
+    if handle.offset > totalLen || handle.length > totalLen:
         raise newException(sstable_types.SSTError, label & " handle exceeds table bounds")
     let endPos = handle.offset + handle.length
     if endPos > totalLen:
@@ -86,7 +88,7 @@ fn decodeFooter(data: seq[uint8]): sstable_types.TableFooter =
     var payloadLen: int32 = 0
     var shift: int32 = 0
     while shift < 4:
-        payloadLen = payloadLen or (int32(data[lengthOffset + shift]) shl (shift * 8))
+        payloadLen = payloadLen | (int32(data[lengthOffset + shift]) << (shift * 8))
         shift = shift + 1
     let payloadStart = lengthOffset - payloadLen
     if payloadStart < 0:
@@ -114,7 +116,7 @@ fn decodeIndex(data: seq[uint8]): seq[sstable_types.IndexEntry] =
     var pos: int32 = 0
     let count = int32(enc.DecodeVarint(data, &pos))
     var i: int32 = 0
-    var entries: seq[sstable_types.IndexEntry] = @[]
+    var entries: seq[sstable_types.IndexEntry]
     while i < count:
         let separatorBytes = enc.ReadBytes(data, &pos)
         let offset = int32(enc.DecodeVarint(data, &pos))
@@ -155,7 +157,7 @@ fn NewTableReader(data: seq[uint8], comparator: core_types.Comparator = core_typ
     validateHandle(data.len, footer.indexHandle, "index")
     let indexSlice = sliceForHandle(data, footer.indexHandle, "index")
     let indexEntries = decodeIndex(indexSlice)
-    var sections: seq[sstable_types.TableSection] = @[]
+    var sections: seq[sstable_types.TableSection]
     var i: int32 = 0
     while i < indexEntries.len:
         let entry = indexEntries[i]
@@ -202,7 +204,7 @@ fn locateBlock(reader: TableReader, key: core_types.Key): option.Option[sstable_
     var hi: int32 = reader.indexEntries.len - 1
     var candidate = option.none(sstable_types.BlockHandle)
     while lo <= hi:
-        let mid = (lo + hi) shr 1
+        let mid = (lo + hi) >> 1
         let entry = reader.indexEntries[mid]
         let cmp = reader.comparator(key, entry.separator)
         if cmp <= 0:
@@ -217,17 +219,17 @@ fn locateBlock(reader: TableReader, key: core_types.Key): option.Option[sstable_
 fn Get(reader: TableReader, key: core_types.Key): option.Option[str] =
     if reader == nil:
         return option.none(str)
-    if not MaybeContains(reader, key):
+    if ! MaybeContains(reader, key):
         return option.none(str)
     let blockHandleOpt = locateBlock(reader, key)
-    if not option.IsSome(blockHandleOpt):
+    if ! option.IsSome(blockHandleOpt):
         return option.none(str)
     let handle = option.Get(blockHandleOpt)
     let slice = loadBlock(reader, handle, "data")
     var blockIter = block.InitBlockIterator(slice)
     while true:
         let nextEntry = block.Next(blockIter)
-        if not option.IsSome(nextEntry):
+        if ! option.IsSome(nextEntry):
             break
         let entry = option.Get(nextEntry)
         let cmp = reader.comparator(entry.key, key)
@@ -237,7 +239,7 @@ fn Get(reader: TableReader, key: core_types.Key): option.Option[str] =
             break
     return option.none(str)
 
-iterator Scan(reader: TableReader): tuple[key: core_types.Key, value: str] =
+iterator Scan(reader: TableReader): ScanItem =
     if reader == nil:
         return
     for entry in reader.indexEntries:
@@ -246,10 +248,10 @@ iterator Scan(reader: TableReader): tuple[key: core_types.Key, value: str] =
         var blockIter = block.InitBlockIterator(slice)
         while true:
             let item = block.Next(blockIter)
-            if not option.IsSome(item):
+            if ! option.IsSome(item):
                 break
             let kv = option.Get(item)
-            yield (key: kv.key, value: kv.value)
+            yield ScanItem(key: kv.key, value: kv.value)
 
 fn TableSize(reader: TableReader): int32 =
     if reader == nil:

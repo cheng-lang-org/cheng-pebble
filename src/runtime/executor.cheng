@@ -5,7 +5,7 @@ type
         execSynchronous
 
 type
-    TaskProc = fn ()
+    TaskProc = fn()
 
 type
     TaskHandle = ref
@@ -46,4 +46,4 @@ fn Wait(handle: TaskHandle) =
 fn IsPending(handle: TaskHandle): bool =
     if handle == nil:
         return false
-    return not handle.completed
+    return ! handle.completed

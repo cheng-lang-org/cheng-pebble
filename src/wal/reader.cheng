@@ -1,10 +1,10 @@
 module pebble_wal_reader
 
-import "../wal/checksum.cheng" as checksum
-import "../wal/types.cheng" as wal_types
-import cheng / stdlib / bootstrap / std / os as os
-import cheng / stdlib / bootstrap / core / option as option
-import cheng / stdlib / bootstrap / strings as strings
+import cheng/pebble/wal/checksum as checksum
+import cheng/pebble/wal/types as wal_types
+import std/os as os
+import std/option as option
+import std/strings as strings
 
 @importc("cheng_fread")
 fn c_fread(ptr: void*, size: int32, n: int32, stream: os.File): int32
@@ -48,14 +48,14 @@ fn skipBytes(reader: WalReader, count: int32): bool =
     return true
 
 fn parseUint32(buf: seq[uint8], idx: int32): uint32 =
-    return uint32(buf[idx]) | (uint32(buf[idx + 1]) shl 8) |
-        (uint32(buf[idx + 2]) shl 16) | (uint32(buf[idx + 3]) shl 24)
+    return uint32(buf[idx]) | (uint32(buf[idx + 1]) << 8) |
+        (uint32(buf[idx + 2]) << 16) | (uint32(buf[idx + 3]) << 24)
 
 fn parseUint64(buf: seq[uint8], idx: int32): uint64 =
     var result: uint64 = 0
     var i: int32 = 0
     while i < 8:
-        result = result | (uint64(buf[idx + i]) shl (8 * i))
+        result = result | (uint64(buf[idx + i]) << (8 * i))
         i = i + 1
     return result
 
@@ -66,7 +66,7 @@ fn nextChunk(reader: WalReader, chunk: var WalChunk): bool =
     while true:
         let remaining = wal_types.blockSize - reader.blockOffset
         if remaining < minHeader:
-            if not skipBytes(reader, remaining):
+            if ! skipBytes(reader, remaining):
                 return false
             reader.blockOffset = 0
             continue
@@ -79,7 +79,7 @@ fn nextChunk(reader: WalReader, chunk: var WalChunk): bool =
             if reader.tailTolerance:
                 reader.eof = true
                 return false
-            raise newException(wal_types.WalError, "WAL truncated header at offset " & strings.`$`(reader.offset))
+            raise newException(wal_types.WalError, "WAL truncated header at offset " & toString(reader.offset))
         reader.blockOffset = reader.blockOffset + wal_types.legacyHeaderSize
         reader.offset = reader.offset + int64(wal_types.legacyHeaderSize)
         let chunkTypeVal = header[6]
@@ -87,7 +87,7 @@ fn nextChunk(reader: WalReader, chunk: var WalChunk): bool =
         let formatInfo = wal_types.HeaderFormatFor(chunkType)
         if formatInfo.headerSize == 0:
             if reader.tailTolerance:
-                discard skipBytes(reader, wal_types.blockSize - reader.blockOffset)
+                skipBytes(reader, wal_types.blockSize - reader.blockOffset)
                 continue
             raise newException(wal_types.WalError, "unknown WAL chunk type")
         var fullHeader = header
@@ -104,8 +104,8 @@ fn nextChunk(reader: WalReader, chunk: var WalChunk): bool =
                 raise newException(wal_types.WalError, "WAL truncated extended header")
             for b in extra:
                 fullHeader.add(b)
-        let payloadLen = int32(fullHeader[4]) | (int32(fullHeader[5]) shl 8)
-        if payloadLen < 0 or payloadLen > wal_types.blockSize - formatInfo.headerSize:
+        let payloadLen = int32(fullHeader[4]) | (int32(fullHeader[5]) << 8)
+        if payloadLen < 0 || payloadLen > wal_types.blockSize - formatInfo.headerSize:
             if reader.tailTolerance:
                 reader.eof = true
                 return false
@@ -143,7 +143,7 @@ fn nextChunk(reader: WalReader, chunk: var WalChunk): bool =
         chunk.data = payload
         chunk.metadata = metadata
         if reader.blockOffset >= wal_types.blockSize:
-            reader.blockOffset = reader.blockOffset mod wal_types.blockSize
+            reader.blockOffset = reader.blockOffset % wal_types.blockSize
         return true
 
 fn NewWalReader(path: str, tailTolerance: bool = true): WalReader =
@@ -161,44 +161,44 @@ fn NewWalReader(path: str, tailTolerance: bool = true): WalReader =
     return reader
 
 fn Close(reader: WalReader) =
-    if reader == nil or reader.file == nil:
+    if reader == nil || reader.file == nil:
         return
     os.close(reader.file)
     reader.file = nil
 
 fn ReadNext(reader: WalReader): option.Option[wal_types.WalReadResult] =
-    if reader == nil or reader.eof:
+    if reader == nil || reader.eof:
         return option.none(wal_types.WalReadResult)
     var aggregate = newSeq[uint8]()
     var recordMeta = wal_types.WalRecordMetadata(logNumber: 0, syncOffset: 0)
     var started = false
     while true:
         var chunk: WalChunk
-        if not nextChunk(reader, chunk):
+        if ! nextChunk(reader, chunk):
             if started:
                 return option.none(wal_types.WalReadResult)
             return option.none(wal_types.WalReadResult)
         let pos = wal_types.ChunkPositionOf(chunk.chunkType)
         if pos == wal_types.ChunkPosFull:
-            if started and reader.tailTolerance:
+            if started && reader.tailTolerance:
                 aggregate.setLen(0)
                 started = false
             return option.some(wal_types.WalReadResult(payload: chunk.data, metadata: chunk.metadata))
         if pos == wal_types.ChunkPosFirst:
-            if started and reader.tailTolerance:
+            if started && reader.tailTolerance:
                 aggregate.setLen(0)
             aggregate = chunk.data
             recordMeta = chunk.metadata
             started = true
         elif pos == wal_types.ChunkPosMiddle:
-            if not started:
+            if ! started:
                 if reader.tailTolerance:
                     continue
                 raise newException(wal_types.WalError, "middle chunk without record start")
             for b in chunk.data:
                 aggregate.add(b)
         elif pos == wal_types.ChunkPosLast:
-            if not started:
+            if ! started:
                 if reader.tailTolerance:
                     continue
                 raise newException(wal_types.WalError, "last chunk without record start")

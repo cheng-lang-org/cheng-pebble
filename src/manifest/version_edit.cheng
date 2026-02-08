@@ -1,8 +1,8 @@
 module pebble_manifest_version_edit
 
-import "../core/types.cheng" as core_types
-import "../manifest/types.cheng" as man_types
-import cheng / stdlib / bootstrap / core / option as option
+import cheng/pebble/core/types as core_types
+import cheng/pebble/manifest/types as man_types
+import std/option as option
 
 type
     AddedFile =
@@ -31,12 +31,12 @@ fn InitVersionEdit(): VersionEdit =
     )
 
 fn IsEmpty(edit: VersionEdit): bool =
-    return not option.IsSome(edit.logNumber) and
-        not option.IsSome(edit.prevLogNumber) and
-        not option.IsSome(edit.nextFileNumber) and
-        not option.IsSome(edit.lastSeqNum) and
-        not option.IsSome(edit.comparatorName) and
-        edit.deletedFiles.len == 0 and
+    return ! option.IsSome(edit.logNumber) &&
+        ! option.IsSome(edit.prevLogNumber) &&
+        ! option.IsSome(edit.nextFileNumber) &&
+        ! option.IsSome(edit.lastSeqNum) &&
+        ! option.IsSome(edit.comparatorName) &&
+        edit.deletedFiles.len == 0 &&
         edit.addedFiles.len == 0
 
 fn SetLogNumber(edit: var VersionEdit, value: uint64) =

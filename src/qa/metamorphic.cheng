@@ -1,17 +1,17 @@
 module pebble_qa_metamorphic
 
-import "../batch/db.cheng" as batch_db
-import "../batch/batch.cheng" as batch_impl
-import "../batch/types.cheng" as batch_types
-import "../batch/interop.cheng" as batch_interop
-import "../core/types.cheng" as core_types
-import "../mem/types.cheng" as mem_types
-import "../runtime/resource_manager.cheng" as resource
-import "./dsl.cheng" as qa_dsl
-import cheng / stdlib / bootstrap / core / option as option
+import cheng/pebble/batch/db as batch_db
+import cheng/pebble/batch/batch as batch_impl
+import cheng/pebble/batch/types as batch_types
+import cheng/pebble/batch/interop as batch_interop
+import cheng/pebble/core/types as core_types
+import cheng/pebble/mem/types as mem_types
+import cheng/pebble/runtime/resource_manager as resource
+import cheng/pebble/qa/dsl as qa_dsl
+import std/option as option
 
 type
-    DBFactory = fn (): batch_db.DB
+    DBFactory = fn(): batch_db.DB
 
 type
     QARunnerConfig =
@@ -54,10 +54,10 @@ fn NextRand(rng: SimpleRng): uint64 =
     return rng.state
 
 fn RandRange(rng: SimpleRng, maxValue: int32): int32 =
-    if rng == nil or maxValue <= 0:
+    if rng == nil || maxValue <= 0:
         return 0
     let r = NextRand(rng)
-    return int32(r mod uint64(maxValue))
+    return int32(r % uint64(maxValue))
 
 fn ShuffleActions(rng: SimpleRng, actions: var seq[qa_dsl.QAAction]) =
     if actions.len <= 1:
@@ -82,16 +82,16 @@ fn LatestState(result: QARunResult): batch_interop.BatchState =
 
 fn RunScenario(actions: seq[qa_dsl.QAAction],
                cfg: QARunnerConfig = DefaultQARunnerConfig()): QARunResult =
-    if actions.len == 0 or cfg.iterations <= 0:
+    if actions.len == 0 || cfg.iterations <= 0:
         return QARunResult(iterations: @[])
     let factory = if cfg.makeDb == nil: defaultDbFactory else: cfg.makeDb
     var rng = InitRng(cfg.seed)
     var output = QARunResult(iterations: @[])
     var sharedDb: batch_db.DB = nil
-    var persistentState: batch_interop.BatchState = @[]
+    var persistentState: batch_interop.BatchState
     var iter: int32 = 0
     while iter < cfg.iterations:
-        if cfg.freshDbEachIteration or sharedDb == nil:
+        if cfg.freshDbEachIteration || sharedDb == nil:
             if sharedDb != nil:
                 batch_db.Close(sharedDb)
             sharedDb = factory()
@@ -99,13 +99,17 @@ fn RunScenario(actions: seq[qa_dsl.QAAction],
                 raise newException(batch_types.BatchError, "QA runner DB factory returned nil")
             if cfg.freshDbEachIteration:
                 persistentState = @[]
-        var sequence: seq[qa_dsl.QAAction] = @[]
+        var sequence: seq[qa_dsl.QAAction]
         var i: int32 = 0
         while i < actions.len:
             sequence.add(actions[i])
             i = i + 1
         ShuffleActions(rng, sequence)
-        var state = if cfg.freshDbEachIteration: @[] else: persistentState
+        var state: batch_interop.BatchState
+        if cfg.freshDbEachIteration:
+            state = @[]
+        else:
+            state = persistentState
         var j: int32 = 0
         while j < sequence.len:
             let action = sequence[j]
@@ -114,17 +118,17 @@ fn RunScenario(actions: seq[qa_dsl.QAAction],
             if action.kind == qa_dsl.QaPut:
                 let value = option.Get(action.value)
                 batch_impl.Put(batch, key, value)
-                discard batch_db.Commit(sharedDb, batch)
+                batch_db.Commit(sharedDb, batch)
                 batch_interop.SetValue(state, action.key, value)
             elif action.kind == qa_dsl.QaDelete:
                 batch_impl.Delete(batch, key)
-                discard batch_db.Commit(sharedDb, batch)
+                batch_db.Commit(sharedDb, batch)
                 if batch_interop.HasKey(state, action.key):
                     batch_interop.DelKey(state, action.key)
             else:
                 let operand = option.Get(action.value)
                 batch_impl.Merge(batch, key, operand)
-                discard batch_db.Commit(sharedDb, batch)
+                batch_db.Commit(sharedDb, batch)
                 let current = batch_db.GetLatest(sharedDb, key)
                 if option.IsSome(current):
                     batch_interop.SetValue(state, action.key, option.Get(current))

@@ -1,9 +1,9 @@
 module pebble_vfs_compat_report
 
-import cheng / stdlib / bootstrap / std / os as os
-import cheng / stdlib / bootstrap / std / strutils as strutils
-import cheng / stdlib / bootstrap / strings as strings
-import cheng / stdlib / bootstrap / std / times as times
+import std/os as os
+import std/std/strutils as strutils
+import std/strings as strings
+import std/std/times as times
 
 
 type
@@ -61,7 +61,7 @@ fn DefaultGaps(): seq[VfsSemanticGap] =
 
 fn ToMarkdown(gaps: seq[VfsSemanticGap],
               timestamp: times.DateTime = times.now()): str =
-    var lines: seq[str] = @[]
+    var lines: seq[str]
     lines.add("# Cheng VFS semantic gaps")
     lines.add("")
     lines.add("| Area | Go behavior | Cheng behavior | Mitigation | Status |")

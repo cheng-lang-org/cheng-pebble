@@ -1,12 +1,12 @@
 module pebble_manifest_tools
 
-import "../core/types.cheng" as core_types
-import "../manifest/types.cheng" as man_types
-import "../manifest/version.cheng" as man_version
-import "../manifest/store.cheng" as man_store
-import cheng / stdlib / bootstrap / strings as strings
-import cheng / stdlib / bootstrap / std / os as os
-import cheng / stdlib / bootstrap / std / strutils as strutils
+import cheng/pebble/core/types as core_types
+import cheng/pebble/manifest/types as man_types
+import cheng/pebble/manifest/version as man_version
+import cheng/pebble/manifest/store as man_store
+import std/strings as strings
+import std/os as os
+import std/std/strutils as strutils
 
 type
     IssueKind = enum
@@ -31,11 +31,11 @@ fn ManifestFormatName(format: man_store.ManifestFormatVersion): str =
     return "v2"
 
 fn AddIssue(report: var ManifestCompatibilityReport, kind: IssueKind, message: str) =
-    report.compatible = report.compatible and kind == IssueWarning
+    report.compatible = report.compatible && kind == IssueWarning
     report.issues.add(ManifestCompatibilityIssue(kind: kind, message: message))
 
 fn DetectManifestFormat(manifestPath: str): man_store.ManifestFormatVersion =
-    if not os.fileExists(manifestPath):
+    if ! os.fileExists(manifestPath):
         return man_store.ManifestFormatV1
     let content = os.readFile(manifestPath)
     let lines = strutils.split(content, '\n')
@@ -68,10 +68,10 @@ fn verifyLevels(version: man_version.Version, report: var ManifestCompatibilityR
         var j: int32 = 0
         while j < entry.files.len:
             let meta = entry.files[j]
-            if not first:
+            if ! first:
                 if core_types.CompareBytewise(prevLargest, meta.smallest) >= 0:
                     AddIssue(report, IssueError,
-                        "level " & strings.`$`(entry.level) &
+                        "level " & toString(entry.level) &
                         " file range overlap: " & man_types.Describe(meta))
                     break
             prevLargest = meta.largest
@@ -87,7 +87,7 @@ fn CheckManifestCompatibility(manifestPath: str,
         targetFormat: targetFormat,
         issues: @[]
     )
-    var records: seq[man_store.ManifestRecord] = @[]
+    var records: seq[man_store.ManifestRecord]
     let store = man_store.InitManifestStore(manifestPath)
     records = man_store.ReadAllRecords(store)
     report.detectedFormat = store.formatVersion
@@ -107,13 +107,13 @@ fn CheckManifestCompatibility(manifestPath: str,
                 raise newException(man_types.ManifestError, "missing snapshot before edit replay")
             current = man_version.ApplyEdit(current, record.edit)
         i = i + 1
-    if not seenSnapshot:
+    if ! seenSnapshot:
         raise newException(man_types.ManifestError, "manifest missing snapshot record")
-    if targetFormat == man_store.ManifestFormatV1 and report.detectedFormat != man_store.ManifestFormatV1:
+    if targetFormat == man_store.ManifestFormatV1 && report.detectedFormat != man_store.ManifestFormatV1:
         AddIssue(report, IssueError,
             "manifest uses " & ManifestFormatName(report.detectedFormat) &
             ", cannot downgrade to " & ManifestFormatName(targetFormat))
-    if report.compatible and current != nil:
+    if report.compatible && current != nil:
         verifyLevels(current, report)
     return report
 
@@ -129,7 +129,7 @@ fn rewriteManifest(records: seq[man_store.ManifestRecord],
             man_store.WriteSnapshot(outStore, record.version)
             wroteSnapshot = true
         else:
-            if not wroteSnapshot:
+            if ! wroteSnapshot:
                 raise newException(man_types.ManifestError, "manifest missing snapshot, cannot rewrite")
             man_store.AppendEdit(outStore, record.edit)
         i = i + 1
@@ -139,7 +139,7 @@ fn rewriteManifest(records: seq[man_store.ManifestRecord],
 fn ConvertManifestFormat(inputPath: str, outputPath: str,
                          targetFormat: man_store.ManifestFormatVersion): ManifestCompatibilityReport =
     var report = CheckManifestCompatibility(inputPath, targetFormat)
-    if not report.compatible:
+    if ! report.compatible:
         return report
     let inputStore = man_store.InitManifestStore(inputPath)
     let records = man_store.ReadAllRecords(inputStore)

@@ -1,7 +1,7 @@
 module pebble_config
 
-import "./config/loader.cheng" as config_loader
-import "./config/container.cheng" as config_container
+import cheng/pebble/config/loader as config_loader
+import cheng/pebble/config/container as config_container
 
 type
     FlatConfig = config_loader.FlatConfig

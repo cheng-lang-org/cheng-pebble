@@ -1,10 +1,10 @@
 module pebble_vfs_posix_fs
 
-import "../vfs/types.cheng" as vtypes
-import "../vfs/faults.cheng" as faults
-import cheng / stdlib / bootstrap / std / os as os
-import cheng / stdlib / bootstrap / strings as strings
-import cheng / stdlib / bootstrap / os as boot_os
+import cheng/pebble/vfs/types as vtypes
+import cheng/pebble/vfs/faults as faults
+import std/os as os
+import std/strings as strings
+import std/os as boot_os
 
 @importc("cheng_fopen")
 fn c_fopen(filename, mode: cstring): boot_os.File
@@ -54,7 +54,7 @@ fn osError(path: str, op: str) =
     raise newException(vtypes.VfsError, op & ": " & path)
 
 fn checkNotClosed(file: PosixFile) =
-    if file == nil or file.file == nil:
+    if file == nil || file.file == nil:
         let label = if file == nil: "<nil>" else: file.path
         osError(label, "file is closed")
 
@@ -76,7 +76,7 @@ fn isAbsolutePath(path: str): bool =
     return os.isAbsolute(path)
 
 fn resolvePath(fs: PosixFileSystem, path: str): str =
-    if fs == nil or fs.root == nil or len(fs.root) == 0:
+    if fs == nil || fs.root == nil || len(fs.root) == 0:
         return path
     if isAbsolutePath(path):
         return path
@@ -93,19 +93,19 @@ fn newPosixFile(file: boot_os.File, path: str, category: vtypes.DiskWriteCategor
                 injector: faults.FaultInjector): vtypes.File =
     let state = PosixFile(file: file, path: path, category: category, injector: injector)
     var out: vtypes.File = new[vtypes.File]()
-    out.closeFn = fn (self: vtypes.File) =
+    out.closeFn = fn(self: vtypes.File) =
         if state.file == nil:
             return
-        discard c_fclose(state.file)
+        c_fclose(state.file)
         state.file = nil
-    out.readFn = fn (self: vtypes.File, dest: void*, size: int32): int32 =
+    out.readFn = fn(self: vtypes.File, dest: void*, size: int32): int32 =
         checkNotClosed(state)
         applyInjector(state.injector, faults.FaultFileRead, state.path)
         let got: int32 = c_fread(dest, 1, int64(size), state.file)
         if got > 0:
             boot_os.ioMeterReport(boot_os.ioRead, int64(got))
         return got
-    out.readAtFn = fn (self: vtypes.File, dest: void*, size: int32, offset: int64): int32 =
+    out.readAtFn = fn(self: vtypes.File, dest: void*, size: int32, offset: int64): int32 =
         checkNotClosed(state)
         applyInjector(state.injector, faults.FaultFileReadAt, state.path)
         if c_fseek(state.file, offset, SeekSet) != 0:
@@ -114,14 +114,14 @@ fn newPosixFile(file: boot_os.File, path: str, category: vtypes.DiskWriteCategor
         if got > 0:
             boot_os.ioMeterReport(boot_os.ioRead, int64(got))
         return got
-    out.writeFn = fn (self: vtypes.File, src: void*, size: int32): int32 =
+    out.writeFn = fn(self: vtypes.File, src: void*, size: int32): int32 =
         checkNotClosed(state)
         applyInjector(state.injector, faults.FaultFileWrite, state.path)
         let wrote: int32 = c_fwrite(src, 1, int64(size), state.file)
         if wrote > 0:
             boot_os.ioMeterReport(boot_os.ioWrite, int64(wrote))
         return wrote
-    out.writeAtFn = fn (self: vtypes.File, src: void*, size: int32, offset: int64): int32 =
+    out.writeAtFn = fn(self: vtypes.File, src: void*, size: int32, offset: int64): int32 =
         checkNotClosed(state)
         applyInjector(state.injector, faults.FaultFileWriteAt, state.path)
         if c_fseek(state.file, offset, SeekSet) != 0:
@@ -130,7 +130,7 @@ fn newPosixFile(file: boot_os.File, path: str, category: vtypes.DiskWriteCategor
         if wrote > 0:
             boot_os.ioMeterReport(boot_os.ioWrite, int64(wrote))
         return wrote
-    out.preallocateFn = fn (self: vtypes.File, offset: int64, length: int64) =
+    out.preallocateFn = fn(self: vtypes.File, offset: int64, length: int64) =
         checkNotClosed(state)
         applyInjector(state.injector, faults.FaultFilePreallocate, state.path)
         if length <= 0:
@@ -142,8 +142,8 @@ fn newPosixFile(file: boot_os.File, path: str, category: vtypes.DiskWriteCategor
         let wrote: int32 = c_fwrite(&zero, 1, 1, state.file)
         if wrote != 1:
             osError(state.path, "preallocate write failed")
-        discard c_fflush(state.file)
-    out.statFn = fn (self: vtypes.File): vtypes.FileInfo =
+        c_fflush(state.file)
+    out.statFn = fn(self: vtypes.File): vtypes.FileInfo =
         checkNotClosed(state)
         let size: int64 = boot_os.fileSize(state.path)
         let mtime: int64 = boot_os.fileMtime(state.path)
@@ -154,35 +154,35 @@ fn newPosixFile(file: boot_os.File, path: str, category: vtypes.DiskWriteCategor
             permissions: 0,
             modTime: mtime
         )
-    out.syncFn = fn (self: vtypes.File) =
+    out.syncFn = fn(self: vtypes.File) =
         checkNotClosed(state)
         applyInjector(state.injector, faults.FaultFileSync, state.path)
         flushAndSync(state.file, state.path)
-    out.syncDataFn = fn (self: vtypes.File) =
+    out.syncDataFn = fn(self: vtypes.File) =
         checkNotClosed(state)
         applyInjector(state.injector, faults.FaultFileSyncData, state.path)
         flushAndSync(state.file, state.path)
-    out.syncToFn = fn (self: vtypes.File, length: int64): bool =
+    out.syncToFn = fn(self: vtypes.File, length: int64): bool =
         checkNotClosed(state)
         applyInjector(state.injector, faults.FaultFileSyncTo, state.path)
-        discard length
+        length
         flushAndSync(state.file, state.path)
         return true
-    out.prefetchFn = fn (self: vtypes.File, offset: int64, length: int64) =
+    out.prefetchFn = fn(self: vtypes.File, offset: int64, length: int64) =
         checkNotClosed(state)
         applyInjector(state.injector, faults.FaultFilePrefetch, state.path)
-        discard offset
-        discard length
-    out.fdFn = fn (self: vtypes.File): uint64 =
-        discard self
+        offset
+        length
+    out.fdFn = fn(self: vtypes.File): uint64 =
+        self
         return vtypes.InvalidFileDescriptor
-    out.mapFn = fn (self: vtypes.File, offset: int64, length: int32,
+    out.mapFn = fn(self: vtypes.File, offset: int64, length: int32,
                     access: vtypes.MmapAccess): vtypes.MmapRegion =
         checkNotClosed(state)
         applyInjector(state.injector, faults.FaultFileMap, state.path)
-        discard offset
-        discard length
-        discard access
+        offset
+        length
+        access
         raise newException(vtypes.VfsError, "mmap not supported")
     return out
 
@@ -199,8 +199,8 @@ fn openFile(fs: PosixFileSystem, path: str, mode: str,
 fn ensureDir(path: str) =
     if os.dirExists(path):
         return
-    discard boot_os.makeDir(path)
-    if not os.dirExists(path):
+    boot_os.makeDir(path)
+    if ! os.dirExists(path):
         osError(path, "mkdir failed")
 
 fn removeTree(path: str) =
@@ -211,44 +211,44 @@ fn removeTree(path: str) =
             let entry = os.get_WalkDirEntry(items, i)
             let kind = entry[0]
             let child = entry[1]
-            if kind == os.pcDir or kind == os.pcLinkToDir:
+            if kind == os.pcDir || kind == os.pcLinkToDir:
                 removeTree(child)
             else:
-                discard c_remove(child)
+                c_remove(child)
             i = i + 1
-        discard c_rmdir(path)
+        c_rmdir(path)
         return
-    discard c_remove(path)
+    c_remove(path)
 
 fn makeFileSystem(state: PosixFileSystem): vtypes.FileSystem =
     var fs: vtypes.FileSystem = new[vtypes.FileSystem]()
-    fs.createFn = fn (self: vtypes.FileSystem, path: str,
+    fs.createFn = fn(self: vtypes.FileSystem, path: str,
                       category: vtypes.DiskWriteCategory): vtypes.File =
-        discard self
+        self
         let resolved = resolvePath(state, path)
         applyInjector(state.injector, faults.FaultCreate, resolved)
         if os.fileExists(resolved):
-            discard c_remove(resolved)
+            c_remove(resolved)
         let file = c_fopen(resolved, "wb+")
         if file == nil:
             osError(resolved, "create failed")
         return newPosixFile(file, resolved, category, state.injector)
-    fs.linkFn = fn (self: vtypes.FileSystem, oldname: str, newname: str) =
-        discard self
+    fs.linkFn = fn(self: vtypes.FileSystem, oldname: str, newname: str) =
+        self
         let oldPath = resolvePath(state, oldname)
         let newPath = resolvePath(state, newname)
         applyInjector(state.injector, faults.FaultLink, newPath)
         if c_link(oldPath, newPath) != 0:
             osError(newPath, "link failed")
-    fs.openFn = fn (self: vtypes.FileSystem, path: str, opts: seq[vtypes.OpenOption]): vtypes.File =
-        discard self
+    fs.openFn = fn(self: vtypes.FileSystem, path: str, opts: seq[vtypes.OpenOption]): vtypes.File =
+        self
         let resolved = resolvePath(state, path)
         applyInjector(state.injector, faults.FaultOpen, resolved)
         return openFile(state, resolved, "rb", vtypes.WriteCategoryUnspecified, opts)
-    fs.openReadWriteFn = fn (self: vtypes.FileSystem, path: str,
+    fs.openReadWriteFn = fn(self: vtypes.FileSystem, path: str,
                              category: vtypes.DiskWriteCategory,
                              opts: seq[vtypes.OpenOption]): vtypes.File =
-        discard self
+        self
         let resolved = resolvePath(state, path)
         applyInjector(state.injector, faults.FaultOpenReadWrite, resolved)
         let file = c_fopen(resolved, "rb+")
@@ -257,66 +257,66 @@ fn makeFileSystem(state: PosixFileSystem): vtypes.FileSystem =
             applyOptions(wrapped, opts)
             return wrapped
         return openFile(state, resolved, "wb+", category, opts)
-    fs.openDirFn = fn (self: vtypes.FileSystem, path: str): vtypes.File =
-        discard self
+    fs.openDirFn = fn(self: vtypes.FileSystem, path: str): vtypes.File =
+        self
         let resolved = resolvePath(state, path)
         applyInjector(state.injector, faults.FaultOpenDir, resolved)
         return openFile(state, resolved, "rb", vtypes.WriteCategoryUnspecified, @[])
-    fs.removeFn = fn (self: vtypes.FileSystem, path: str) =
-        discard self
+    fs.removeFn = fn(self: vtypes.FileSystem, path: str) =
+        self
         let resolved = resolvePath(state, path)
         applyInjector(state.injector, faults.FaultRemove, resolved)
         if c_remove(resolved) != 0:
-            discard c_rmdir(resolved)
-    fs.removeAllFn = fn (self: vtypes.FileSystem, path: str) =
-        discard self
+            c_rmdir(resolved)
+    fs.removeAllFn = fn(self: vtypes.FileSystem, path: str) =
+        self
         let resolved = resolvePath(state, path)
         applyInjector(state.injector, faults.FaultRemoveAll, resolved)
         removeTree(resolved)
-    fs.renameFn = fn (self: vtypes.FileSystem, oldname: str, newname: str) =
-        discard self
+    fs.renameFn = fn(self: vtypes.FileSystem, oldname: str, newname: str) =
+        self
         let oldPath = resolvePath(state, oldname)
         let newPath = resolvePath(state, newname)
         applyInjector(state.injector, faults.FaultRename, newPath)
         if c_rename(oldPath, newPath) != 0:
             osError(newPath, "rename failed")
-    fs.reuseForWriteFn = fn (self: vtypes.FileSystem, oldname: str, newname: str,
+    fs.reuseForWriteFn = fn(self: vtypes.FileSystem, oldname: str, newname: str,
                              category: vtypes.DiskWriteCategory): vtypes.File =
-        discard self
+        self
         let oldPath = resolvePath(state, oldname)
         let newPath = resolvePath(state, newname)
         applyInjector(state.injector, faults.FaultReuseForWrite, newPath)
         if c_rename(oldPath, newPath) != 0:
             return openFile(state, newPath, "wb+", category, @[])
         return openFile(state, newPath, "rb+", category, @[])
-    fs.mkdirAllFn = fn (self: vtypes.FileSystem, path: str, perm: uint32) =
-        discard self
-        discard perm
+    fs.mkdirAllFn = fn(self: vtypes.FileSystem, path: str, perm: uint32) =
+        self
+        perm
         let resolved = resolvePath(state, path)
         applyInjector(state.injector, faults.FaultMkdirAll, resolved)
         var current: str = ""
         var i: int32 = 0
         while i < len(resolved):
             let ch: char = resolved[i]
-            if ch == '/' or ch == '\\':
+            if ch == '/' || ch == '\\':
                 if len(current) > 1:
                     ensureDir(current)
             current = current + strings.charToStr(ch)
             i = i + 1
         if len(current) > 0:
             ensureDir(current)
-    fs.lockFn = fn (self: vtypes.FileSystem, path: str): vtypes.File =
-        discard self
+    fs.lockFn = fn(self: vtypes.FileSystem, path: str): vtypes.File =
+        self
         let resolved = resolvePath(state, path)
         applyInjector(state.injector, faults.FaultLock, resolved)
         if os.fileExists(resolved):
             osError(resolved, "lock file exists")
         return openFile(state, resolved, "wb+", vtypes.WriteCategoryUnspecified, @[])
-    fs.listFn = fn (self: vtypes.FileSystem, path: str): seq[str] =
-        discard self
+    fs.listFn = fn(self: vtypes.FileSystem, path: str): seq[str] =
+        self
         let resolved = resolvePath(state, path)
         applyInjector(state.injector, faults.FaultList, resolved)
-        var entries: seq[str] = @[]
+        var entries: seq[str]
         let items: os.seq_WalkDirEntry = os.walkDir(resolved)
         var i: int32 = 0
         while i < items.len:
@@ -326,14 +326,14 @@ fn makeFileSystem(state: PosixFileSystem): vtypes.FileSystem =
             entries.add(name)
             i = i + 1
         return entries
-    fs.statFn = fn (self: vtypes.FileSystem, path: str): vtypes.FileInfo =
-        discard self
+    fs.statFn = fn(self: vtypes.FileSystem, path: str): vtypes.FileInfo =
+        self
         let resolved = resolvePath(state, path)
         applyInjector(state.injector, faults.FaultStat, resolved)
         let size: int64 = boot_os.fileSize(resolved)
         let mtime: int64 = boot_os.fileMtime(resolved)
         let isDir: bool = os.dirExists(resolved)
-        if not isDir and not os.fileExists(resolved):
+        if ! isDir && ! os.fileExists(resolved):
             osError(resolved, "stat failed")
         return vtypes.FileInfo(
             size: size,
@@ -341,14 +341,14 @@ fn makeFileSystem(state: PosixFileSystem): vtypes.FileSystem =
             permissions: 0,
             modTime: mtime
         )
-    fs.pathBaseFn = fn (self: vtypes.FileSystem, path: str): str =
-        discard self
+    fs.pathBaseFn = fn(self: vtypes.FileSystem, path: str): str =
+        self
         let parts = os.splitFile(path)
         if len(parts.ext) > 0:
             return parts.name + parts.ext
         return parts.name
-    fs.pathJoinFn = fn (self: vtypes.FileSystem, parts: seq[str]): str =
-        discard self
+    fs.pathJoinFn = fn(self: vtypes.FileSystem, parts: seq[str]): str =
+        self
         if parts.len == 0:
             return "."
         var acc = parts[0]
@@ -357,20 +357,24 @@ fn makeFileSystem(state: PosixFileSystem): vtypes.FileSystem =
             acc = os.joinPath(acc, parts[i])
             i = i + 1
         return acc
-    fs.pathDirFn = fn (self: vtypes.FileSystem, path: str): str =
-        discard self
+    fs.pathDirFn = fn(self: vtypes.FileSystem, path: str): str =
+        self
         return os.parentDir(path)
-    fs.diskUsageFn = fn (self: vtypes.FileSystem, path: str): vtypes.DiskUsage =
-        discard self
+    fs.diskUsageFn = fn(self: vtypes.FileSystem, path: str): vtypes.DiskUsage =
+        self
         let resolved = resolvePath(state, path)
         applyInjector(state.injector, faults.FaultDiskUsage, resolved)
         return vtypes.DiskUsage(availBytes: 0, totalBytes: 0, usedBytes: 0)
-    fs.unwrapFn = fn (self: vtypes.FileSystem): vtypes.FileSystem =
-        discard self
+    fs.unwrapFn = fn(self: vtypes.FileSystem): vtypes.FileSystem =
+        self
         return nil
     return fs
 
-fn NewPosixFileSystem(root: str = "", injector: faults.FaultInjector = nil): vtypes.FileSystem =
-    let normRoot = if root == nil: "" else: root
+fn NewPosixFileSystem(root: str, injector: faults.FaultInjector): vtypes.FileSystem =
+    var normRoot: str
+    if root == nil:
+        normRoot = ""
+    else:
+        normRoot = root
     let state = PosixFileSystem(root: normRoot, injector: injector)
     return makeFileSystem(state)

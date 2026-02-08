@@ -1,17 +1,18 @@
 module pebble_batch_batch
 
-import "../core/types.cheng" as core_types
-import "../mem/memtable.cheng" as memtable
-import "../mem/types.cheng" as mem_types
-import "../batch/types.cheng" as batch_types
-import cheng / stdlib / bootstrap / core / option as option
-import cheng / stdlib / bootstrap / strings as strings
+import cheng/pebble/core/types as core_types
+import cheng/pebble/mem/memtable as memtable
+import cheng/pebble/mem/types as mem_types
+import cheng/pebble/batch/types as batch_types
+import std/option as option
+import std/system as sys
+import std/strings as strings
 
 const
     EntryOverhead = 16
 
 type
-    BatchResolver = fn (key: core_types.Key,
+    BatchResolver = fn(key: core_types.Key,
                         snapshot: batch_types.Snapshot): option.Option[str]
 
 type
@@ -120,7 +121,7 @@ fn calcEntryBytes(op: batch_types.BatchOp): int32 =
     return core_types.ToBytes(op.key).len + op.value.len + EntryOverhead
 
 fn appendIndex(batch: IndexedBatch, op: batch_types.BatchOp) =
-    if batch == nil or batch.index == nil:
+    if batch == nil || batch.index == nil:
         return
     batch.nextSeq = batch.nextSeq + 1
     let entry = mem_types.ApplyEntry(
@@ -140,19 +141,19 @@ fn appendOp(batch: BatchBase, op: batch_types.BatchOp, idx: IndexedBatch) =
 
 fn writeUint32(buf: var seq[uint8], value: uint32) =
     buf.add(uint8(value & uint32(0xFF)))
-    buf.add(uint8((value shr 8) & uint32(0xFF)))
-    buf.add(uint8((value shr 16) & uint32(0xFF)))
-    buf.add(uint8((value shr 24) & uint32(0xFF)))
+    buf.add(uint8((value >> 8) & uint32(0xFF)))
+    buf.add(uint8((value >> 16) & uint32(0xFF)))
+    buf.add(uint8((value >> 24) & uint32(0xFF)))
 
 fn writeUint64(buf: var seq[uint8], value: uint64) =
     buf.add(uint8(value & uint64(0xFF)))
-    buf.add(uint8((value shr 8) & uint64(0xFF)))
-    buf.add(uint8((value shr 16) & uint64(0xFF)))
-    buf.add(uint8((value shr 24) & uint64(0xFF)))
-    buf.add(uint8((value shr 32) & uint64(0xFF)))
-    buf.add(uint8((value shr 40) & uint64(0xFF)))
-    buf.add(uint8((value shr 48) & uint64(0xFF)))
-    buf.add(uint8((value shr 56) & uint64(0xFF)))
+    buf.add(uint8((value >> 8) & uint64(0xFF)))
+    buf.add(uint8((value >> 16) & uint64(0xFF)))
+    buf.add(uint8((value >> 24) & uint64(0xFF)))
+    buf.add(uint8((value >> 32) & uint64(0xFF)))
+    buf.add(uint8((value >> 40) & uint64(0xFF)))
+    buf.add(uint8((value >> 48) & uint64(0xFF)))
+    buf.add(uint8((value >> 56) & uint64(0xFF)))
 
 fn writeString(buf: var seq[uint8], text: str) =
     var i: int32 = 0
@@ -161,6 +162,45 @@ fn writeString(buf: var seq[uint8], text: str) =
         let ch = strings.charAt(text, i)
         buf.add(uint8(ord(ch)))
         i = i + 1
+
+fn readUint32(data: seq[uint8], pos: int32*): uint32 =
+    if *pos + 4 > data.len:
+        raise newException(batch_types.BatchError, "WAL payload truncated (u32)")
+    let value = uint32(data[*pos]) |
+        (uint32(data[*pos + 1]) << 8) |
+        (uint32(data[*pos + 2]) << 16) |
+        (uint32(data[*pos + 3]) << 24)
+    *pos = *pos + 4
+    return value
+
+fn readUint64(data: seq[uint8], pos: int32*): uint64 =
+    if *pos + 8 > data.len:
+        raise newException(batch_types.BatchError, "WAL payload truncated (u64)")
+    var value: uint64 = 0
+    var i: int32 = 0
+    while i < 8:
+        value = value | (uint64(data[*pos + i]) << (i * 8))
+        i = i + 1
+    *pos = *pos + 8
+    return value
+
+fn readString(data: seq[uint8], pos: int32*): str =
+    let length = int32(readUint32(data, pos))
+    if length < 0 || *pos + length > data.len:
+        raise newException(batch_types.BatchError, "WAL payload truncated (string)")
+    var out: str = ""
+    var i: int32 = 0
+    while i < length:
+        out = out + strings.charToStr(sys.chr(int32(data[*pos + i])))
+        i = i + 1
+    *pos = *pos + length
+    return out
+
+fn readKind(raw: uint8): mem_types.MemValueKind =
+    let v = int32(raw)
+    if v < int32(mem_types.MemValueSet) || v > int32(mem_types.MemValueMerge):
+        raise newException(batch_types.BatchError, "invalid WAL op kind: " & toString(v))
+    return mem_types.MemValueKind(v)
 
 fn ToWalPayload(batch: BatchBase, entries: openArray[mem_types.ApplyEntry]): seq[uint8] =
     if entries.len == 0:
@@ -176,6 +216,34 @@ fn ToWalPayload(batch: BatchBase, entries: openArray[mem_types.ApplyEntry]): seq
         out.writeUint32(uint32(entry.value.len))
         out.writeString(entry.value)
     return out
+
+fn FromWalPayload(payload: seq[uint8]): seq[mem_types.ApplyEntry] =
+    if payload.len == 0:
+        return @[]
+    var pos: int32 = 0
+    let count = int32(readUint32(payload, &pos))
+    if count < 0:
+        raise newException(batch_types.BatchError, "negative WAL entry count")
+    var entries = newSeq[mem_types.ApplyEntry](count)
+    var i: int32 = 0
+    while i < count:
+        if pos >= payload.len:
+            raise newException(batch_types.BatchError, "WAL payload truncated (entry kind)")
+        let kind = readKind(payload[pos])
+        pos = pos + 1
+        let seq = core_types.ToSequence(readUint64(payload, &pos))
+        let key = core_types.ToKey(readString(payload, &pos))
+        let value = readString(payload, &pos)
+        entries[i] = mem_types.ApplyEntry(
+            key: key,
+            seq: seq,
+            kind: kind,
+            value: value
+        )
+        i = i + 1
+    if pos != payload.len:
+        raise newException(batch_types.BatchError, "WAL payload has trailing bytes")
+    return entries
 
 fn Put(batch: BatchBase, key: core_types.Key, value: str, idx: IndexedBatch = nil) =
     let op = batch_types.BatchOp(key: key, value: value, kind: mem_types.MemValueSet)
@@ -211,7 +279,7 @@ fn Apply(dest: BatchBase, src: BatchBase, idx: IndexedBatch = nil) =
         appendOp(dest, op, idx)
 
 fn ToApplyEntries(batch: BatchBase, startSeq: core_types.SequenceNumber): seq[mem_types.ApplyEntry] =
-    if batch == nil or batch.ops.len == 0:
+    if batch == nil || batch.ops.len == 0:
         return @[]
     let count = batch.ops.len
     var entries = newSeq[mem_types.ApplyEntry](count)
@@ -238,7 +306,7 @@ fn Snapshot(batch: IndexedBatch): batch_types.Snapshot =
     return batch.snapshot
 
 fn Get(batch: IndexedBatch, key: core_types.Key, snapshot: batch_types.Snapshot): option.Option[str] =
-    if batch == nil or batch.index == nil:
+    if batch == nil || batch.index == nil:
         return option.none(str)
     let local = memtable.Get(batch.index, key, core_types.ToSequence(core_types.ToUint64(snapshot.seq)))
     if option.IsSome(local):

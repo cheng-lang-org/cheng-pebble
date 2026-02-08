@@ -28,7 +28,7 @@ type
         hasQuota: array[4, bool]
 
 fn kindIndex(kind: ResourceKind): int32 =
-    return (int32)(kind)
+    return int32(kind)
 
 fn NewResourceManager(): ResourceManager =
     var rm: ResourceManager = new[ResourceManager]()
@@ -57,10 +57,10 @@ fn AcquireQuota(rm: ResourceManager, kind: ResourceKind,
     if rm == nil:
         raise newException(ResourceError, "resource manager is nil")
     let idx = kindIndex(kind)
-    if not rm.hasQuota[idx]:
+    if ! rm.hasQuota[idx]:
         raise newException(ResourceError, "quota not configured for kind")
     var quota = rm.quotas[idx]
-    if quota.hardLimit > 0 and quota.inUse + amount > quota.hardLimit:
+    if quota.hardLimit > 0 && quota.inUse + amount > quota.hardLimit:
         raise newException(ResourceError, "hard limit exceeded")
     quota.inUse = quota.inUse + amount
     rm.quotas[idx] = quota
@@ -70,7 +70,7 @@ fn Release(rm: ResourceManager, ticket: ResourceTicket) =
     if rm == nil:
         return
     let idx = kindIndex(ticket.kind)
-    if not rm.hasQuota[idx]:
+    if ! rm.hasQuota[idx]:
         return
     var quota = rm.quotas[idx]
     quota.inUse = quota.inUse - ticket.amount
@@ -82,7 +82,7 @@ fn Utilization(rm: ResourceManager, kind: ResourceKind): float64 =
     if rm == nil:
         return 0.0
     let idx = kindIndex(kind)
-    if not rm.hasQuota[idx]:
+    if ! rm.hasQuota[idx]:
         return 0.0
     let quota = rm.quotas[idx]
     if quota.hardLimit <= 0:
@@ -93,7 +93,7 @@ fn IsSoftExceeded(rm: ResourceManager, kind: ResourceKind): bool =
     if rm == nil:
         return false
     let idx = kindIndex(kind)
-    if not rm.hasQuota[idx]:
+    if ! rm.hasQuota[idx]:
         return false
     let quota = rm.quotas[idx]
     if quota.softLimit <= 0:

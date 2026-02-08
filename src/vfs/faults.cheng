@@ -1,6 +1,6 @@
 module pebble_vfs_faults
 
-import cheng / stdlib / bootstrap / core / option as option
+import std/option as option
 
 type
     FaultOp = enum
@@ -30,7 +30,7 @@ type
         FaultFileMap
 
 type
-    FaultHook = fn (op: FaultOp, path: str): option.Option[str]
+    FaultHook = fn(op: FaultOp, path: str): option.Option[str]
 
 type
     FaultInjector = ref
@@ -61,4 +61,4 @@ fn ShouldFail(injector: FaultInjector, op: FaultOp, path: str) =
         i = i + 1
 
 fn HasHooks(injector: FaultInjector): bool =
-    return injector != nil and injector.hooks.len > 0
+    return injector != nil && injector.hooks.len > 0

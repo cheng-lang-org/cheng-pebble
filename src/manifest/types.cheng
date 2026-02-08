@@ -1,7 +1,7 @@
 module pebble_manifest_types
 
-import "../core/types.cheng" as core_types
-import cheng / stdlib / bootstrap / strings as strings
+import cheng/pebble/core/types as core_types
+import std/strings as strings
 
 type
     ManifestError =
@@ -54,22 +54,22 @@ fn Overlaps(a: FileMetadata, b: FileMetadata): bool =
     let bLarge = core_types.ToBytes(b.largest)
     let aBefore = core_types.CompareBytewise(aLarge, bSmall) < 0
     let bBefore = core_types.CompareBytewise(bLarge, aSmall) < 0
-    return not (aBefore or bBefore)
+    return !(aBefore || bBefore)
 
 fn Describe(meta: FileMetadata): str =
-    let fileNumStr = strings.`$`(meta.fileNum)
-    let sizeStr = strings.`$`(meta.sizeBytes)
+    let fileNumStr = toString(meta.fileNum)
+    let sizeStr = toString(meta.sizeBytes)
     let minKey = core_types.ToBytes(meta.smallest)
     let maxKey = core_types.ToBytes(meta.largest)
-    let minSeq = strings.`$`(core_types.ToUint64(meta.smallestSeq))
-    let maxSeq = strings.`$`(core_types.ToUint64(meta.largestSeq))
+    let minSeq = toString(core_types.ToUint64(meta.smallestSeq))
+    let maxSeq = toString(core_types.ToUint64(meta.largestSeq))
     return "file=" & fileNumStr & ",size=" & sizeStr &
         ",keys=[" & minKey & ".." & maxKey & "],seq=[" & minSeq & ".." & maxSeq & "]"
 
 fn ValidateRange(meta: FileMetadata) =
     let smallest = core_types.ToBytes(meta.smallest)
     let largest = core_types.ToBytes(meta.largest)
-    if strings.len(smallest) == 0 or strings.len(largest) == 0:
+    if strings.len(smallest) == 0 || strings.len(largest) == 0:
         raise newException(ManifestError, "file key range cannot be empty")
     if core_types.CompareBytewise(meta.largest, meta.smallest) < 0:
         raise newException(ManifestError, "largest key is smaller than smallest key")

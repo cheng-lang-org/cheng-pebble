@@ -1,10 +1,10 @@
 module pebble_sstable_block
 
-import "../core/types.cheng" as core_types
-import "../sstable/types.cheng" as sstable_types
-import "../sstable/encoding.cheng" as enc
-import cheng / stdlib / bootstrap / core / option as option
-import cheng / stdlib / bootstrap / strings as strings
+import cheng/pebble/core/types as core_types
+import cheng/pebble/sstable/types as sstable_types
+import cheng/pebble/sstable/encoding as enc
+import std/option as option
+import std/strings as strings
 
 const
     PrefixCompressedMagic = "\xffPC"
@@ -58,14 +58,15 @@ fn decodePrefixCompressed(it: var BlockIterator): option.Option[BlockItem] =
         return option.none(BlockItem)
     it.remaining = it.remaining - 1
     let shared = int32(enc.DecodeVarint(it.data, &it.pos))
-    if shared < 0 or shared > strings.len(it.lastKey):
+    if shared < 0 || shared > strings.len(it.lastKey):
         raise newException(sstable_types.SSTError, "invalid shared prefix length")
     let suffix = enc.ReadBytes(it.data, &it.pos)
     let valueBytes = enc.ReadBytes(it.data, &it.pos)
-    let keyBytes = if shared == 0:
-        suffix
+    var keyBytes: str
+    if shared == 0:
+        keyBytes = suffix
     else:
-        it.lastKey[0..shared - 1] & suffix
+        keyBytes = it.lastKey[0..shared - 1] & suffix
     it.lastKey = keyBytes
     return option.some(BlockItem(key: core_types.ToKey(keyBytes), value: valueBytes))
 
@@ -86,7 +87,7 @@ fn appendSeq(dst: var seq[uint8], src: seq[uint8]) =
         i = i + 1
 
 fn encodePrefixCompressed(entries: seq[BlockEntry]): seq[uint8] =
-    var buffer: seq[uint8] = @[]
+    var buffer: seq[uint8]
     enc.AppendVarint(buffer, uint64(entries.len))
     var lastKey: str = ""
     var i: int32 = 0
@@ -96,7 +97,7 @@ fn encodePrefixCompressed(entries: seq[BlockEntry]): seq[uint8] =
         let lastLen: int32 = strings.len(lastKey)
         let keyLen: int32 = strings.len(keyBytes)
         var shared: int32 = 0
-        while shared < lastLen and shared < keyLen and
+        while shared < lastLen && shared < keyLen &&
             strings.charAt(lastKey, shared) == strings.charAt(keyBytes, shared):
             shared = shared + 1
         enc.AppendVarint(buffer, uint64(shared))
@@ -105,7 +106,7 @@ fn encodePrefixCompressed(entries: seq[BlockEntry]): seq[uint8] =
         enc.AppendBytes(buffer, entry.value)
         lastKey = keyBytes
         i = i + 1
-    var out: seq[uint8] = @[]
+    var out: seq[uint8]
     enc.AppendStrBytes(out, PrefixCompressedMagic)
     appendSeq(out, buffer)
     return out
@@ -118,7 +119,7 @@ fn Finish(builder: var BlockBuilder): BlockBuildResult =
         result.payload = encodePrefixCompressed(builder.entries)
         result.encoding = sstable_types.BlockEncodingPrefixCompressed
     else:
-        var buffer: seq[uint8] = @[]
+        var buffer: seq[uint8]
         var i: int32 = 0
         while i < builder.entries.len:
             let entry = builder.entries[i]

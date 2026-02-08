@@ -1,7 +1,7 @@
 module pebble_vfs_buffered_fs
 
-import "../vfs/types.cheng" as vtypes
-import cheng / stdlib / bootstrap / system as sys
+import cheng/pebble/vfs/types as vtypes
+import std/system as sys
 
 const
     DefaultBufferSize: int32 = 64 * 1024
@@ -26,7 +26,7 @@ fn minInt32(a: int32, b: int32): int32 =
     return if a < b: a else: b
 
 fn flushWriteBuffer(state: BufferedFileState) =
-    if state == nil or state.writeLen <= 0:
+    if state == nil || state.writeLen <= 0:
         return
     var total: int32 = 0
     while total < state.writeLen:
@@ -61,15 +61,15 @@ fn NewBufferedFile(inner: vtypes.File, bufferSize: int32 = DefaultBufferSize): v
         bufferSize: size
     )
     var out: vtypes.File = new[vtypes.File]()
-    out.closeFn = fn (self: vtypes.File) =
-        discard self
+    out.closeFn = fn(self: vtypes.File) =
+        self
         if state.inner == nil:
             return
         flushWriteBuffer(state)
         vtypes.Close(state.inner)
         state.inner = nil
-    out.readFn = fn (self: vtypes.File, dest: void*, size: int32): int32 =
-        discard self
+    out.readFn = fn(self: vtypes.File, dest: void*, size: int32): int32 =
+        self
         if size <= 0:
             return 0
         if state.writeLen > 0:
@@ -91,12 +91,12 @@ fn NewBufferedFile(inner: vtypes.File, bufferSize: int32 = DefaultBufferSize): v
             state.readPos = state.readPos + toCopy
             total = total + toCopy
         return total
-    out.readAtFn = fn (self: vtypes.File, dest: void*, size: int32, offset: int64): int32 =
-        discard self
+    out.readAtFn = fn(self: vtypes.File, dest: void*, size: int32, offset: int64): int32 =
+        self
         flushWriteBuffer(state)
         return vtypes.ReadAt(state.inner, dest, size, offset)
-    out.writeFn = fn (self: vtypes.File, src: void*, size: int32): int32 =
-        discard self
+    out.writeFn = fn(self: vtypes.File, src: void*, size: int32): int32 =
+        self
         if size <= 0:
             return 0
         var remaining = size
@@ -116,41 +116,41 @@ fn NewBufferedFile(inner: vtypes.File, bufferSize: int32 = DefaultBufferSize): v
             if state.writeLen >= state.bufferSize:
                 flushWriteBuffer(state)
         return size
-    out.writeAtFn = fn (self: vtypes.File, src: void*, size: int32, offset: int64): int32 =
-        discard self
+    out.writeAtFn = fn(self: vtypes.File, src: void*, size: int32, offset: int64): int32 =
+        self
         if size <= 0:
             return 0
         flushWriteBuffer(state)
         return vtypes.WriteAt(state.inner, src, size, offset)
-    out.preallocateFn = fn (self: vtypes.File, offset: int64, length: int64) =
-        discard self
+    out.preallocateFn = fn(self: vtypes.File, offset: int64, length: int64) =
+        self
         flushWriteBuffer(state)
         vtypes.Preallocate(state.inner, offset, length)
-    out.statFn = fn (self: vtypes.File): vtypes.FileInfo =
-        discard self
+    out.statFn = fn(self: vtypes.File): vtypes.FileInfo =
+        self
         flushWriteBuffer(state)
         return vtypes.Stat(state.inner)
-    out.syncFn = fn (self: vtypes.File) =
-        discard self
+    out.syncFn = fn(self: vtypes.File) =
+        self
         flushWriteBuffer(state)
         vtypes.Sync(state.inner)
-    out.syncDataFn = fn (self: vtypes.File) =
-        discard self
+    out.syncDataFn = fn(self: vtypes.File) =
+        self
         flushWriteBuffer(state)
         vtypes.SyncData(state.inner)
-    out.syncToFn = fn (self: vtypes.File, length: int64): bool =
-        discard self
+    out.syncToFn = fn(self: vtypes.File, length: int64): bool =
+        self
         flushWriteBuffer(state)
         return vtypes.SyncTo(state.inner, length)
-    out.prefetchFn = fn (self: vtypes.File, offset: int64, length: int64) =
-        discard self
+    out.prefetchFn = fn(self: vtypes.File, offset: int64, length: int64) =
+        self
         vtypes.Prefetch(state.inner, offset, length)
-    out.fdFn = fn (self: vtypes.File): uint64 =
-        discard self
+    out.fdFn = fn(self: vtypes.File): uint64 =
+        self
         return vtypes.Fd(state.inner)
-    out.mapFn = fn (self: vtypes.File, offset: int64, length: int32,
+    out.mapFn = fn(self: vtypes.File, offset: int64, length: int32,
                     access: vtypes.MmapAccess): vtypes.MmapRegion =
-        discard self
+        self
         flushWriteBuffer(state)
         return vtypes.Map(state.inner, offset, length, access)
     return out
@@ -161,7 +161,7 @@ fn wrapFile(state: BufferedFileSystemState, file: vtypes.File): vtypes.File =
     return NewBufferedFile(file, state.bufferSize)
 
 fn NewBufferedFileSystem(base: vtypes.FileSystem,
-                         bufferSize: int32 = DefaultBufferSize): vtypes.FileSystem =
+                         bufferSize: int32): vtypes.FileSystem =
     if base == nil:
         raise newException(ValueError, "base FileSystem must not be nil")
     var size = bufferSize
@@ -169,62 +169,62 @@ fn NewBufferedFileSystem(base: vtypes.FileSystem,
         size = MinBufferSize
     let state = BufferedFileSystemState(base: base, bufferSize: size)
     var fs: vtypes.FileSystem = new[vtypes.FileSystem]()
-    fs.createFn = fn (self: vtypes.FileSystem, path: str,
+    fs.createFn = fn(self: vtypes.FileSystem, path: str,
                       category: vtypes.DiskWriteCategory): vtypes.File =
-        discard self
+        self
         return wrapFile(state, vtypes.Create(state.base, path, category))
-    fs.linkFn = fn (self: vtypes.FileSystem, oldname: str, newname: str) =
-        discard self
+    fs.linkFn = fn(self: vtypes.FileSystem, oldname: str, newname: str) =
+        self
         vtypes.Link(state.base, oldname, newname)
-    fs.openFn = fn (self: vtypes.FileSystem, path: str, opts: seq[vtypes.OpenOption]): vtypes.File =
-        discard self
+    fs.openFn = fn(self: vtypes.FileSystem, path: str, opts: seq[vtypes.OpenOption]): vtypes.File =
+        self
         return wrapFile(state, vtypes.Open(state.base, path, opts))
-    fs.openReadWriteFn = fn (self: vtypes.FileSystem, path: str,
+    fs.openReadWriteFn = fn(self: vtypes.FileSystem, path: str,
                              category: vtypes.DiskWriteCategory,
                              opts: seq[vtypes.OpenOption]): vtypes.File =
-        discard self
+        self
         return wrapFile(state, vtypes.OpenReadWrite(state.base, path, category, opts))
-    fs.openDirFn = fn (self: vtypes.FileSystem, path: str): vtypes.File =
-        discard self
+    fs.openDirFn = fn(self: vtypes.FileSystem, path: str): vtypes.File =
+        self
         return vtypes.OpenDir(state.base, path)
-    fs.removeFn = fn (self: vtypes.FileSystem, path: str) =
-        discard self
+    fs.removeFn = fn(self: vtypes.FileSystem, path: str) =
+        self
         vtypes.Remove(state.base, path)
-    fs.removeAllFn = fn (self: vtypes.FileSystem, path: str) =
-        discard self
+    fs.removeAllFn = fn(self: vtypes.FileSystem, path: str) =
+        self
         vtypes.RemoveAll(state.base, path)
-    fs.renameFn = fn (self: vtypes.FileSystem, oldname: str, newname: str) =
-        discard self
+    fs.renameFn = fn(self: vtypes.FileSystem, oldname: str, newname: str) =
+        self
         vtypes.Rename(state.base, oldname, newname)
-    fs.reuseForWriteFn = fn (self: vtypes.FileSystem, oldname: str, newname: str,
+    fs.reuseForWriteFn = fn(self: vtypes.FileSystem, oldname: str, newname: str,
                              category: vtypes.DiskWriteCategory): vtypes.File =
-        discard self
+        self
         return wrapFile(state, vtypes.ReuseForWrite(state.base, oldname, newname, category))
-    fs.mkdirAllFn = fn (self: vtypes.FileSystem, path: str, perm: uint32) =
-        discard self
+    fs.mkdirAllFn = fn(self: vtypes.FileSystem, path: str, perm: uint32) =
+        self
         vtypes.MkdirAll(state.base, path, perm)
-    fs.lockFn = fn (self: vtypes.FileSystem, path: str): vtypes.File =
-        discard self
+    fs.lockFn = fn(self: vtypes.FileSystem, path: str): vtypes.File =
+        self
         return vtypes.Lock(state.base, path)
-    fs.listFn = fn (self: vtypes.FileSystem, path: str): seq[str] =
-        discard self
+    fs.listFn = fn(self: vtypes.FileSystem, path: str): seq[str] =
+        self
         return vtypes.List(state.base, path)
-    fs.statFn = fn (self: vtypes.FileSystem, path: str): vtypes.FileInfo =
-        discard self
+    fs.statFn = fn(self: vtypes.FileSystem, path: str): vtypes.FileInfo =
+        self
         return vtypes.StatPath(state.base, path)
-    fs.pathBaseFn = fn (self: vtypes.FileSystem, path: str): str =
-        discard self
+    fs.pathBaseFn = fn(self: vtypes.FileSystem, path: str): str =
+        self
         return vtypes.PathBase(state.base, path)
-    fs.pathJoinFn = fn (self: vtypes.FileSystem, parts: seq[str]): str =
-        discard self
+    fs.pathJoinFn = fn(self: vtypes.FileSystem, parts: seq[str]): str =
+        self
         return vtypes.PathJoin(state.base, parts)
-    fs.pathDirFn = fn (self: vtypes.FileSystem, path: str): str =
-        discard self
+    fs.pathDirFn = fn(self: vtypes.FileSystem, path: str): str =
+        self
         return vtypes.PathDir(state.base, path)
-    fs.diskUsageFn = fn (self: vtypes.FileSystem, path: str): vtypes.DiskUsage =
-        discard self
+    fs.diskUsageFn = fn(self: vtypes.FileSystem, path: str): vtypes.DiskUsage =
+        self
         return vtypes.DiskUsage(state.base, path)
-    fs.unwrapFn = fn (self: vtypes.FileSystem): vtypes.FileSystem =
-        discard self
+    fs.unwrapFn = fn(self: vtypes.FileSystem): vtypes.FileSystem =
+        self
         return state.base
     return fs

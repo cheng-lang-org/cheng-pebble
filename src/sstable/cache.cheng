@@ -1,7 +1,7 @@
 module pebble_sstable_cache
 
-import cheng / stdlib / bootstrap / core / option as option
-import cheng / stdlib / bootstrap / strings as strings
+import std/option as option
+import std/strings as strings
 
 type
     CacheEntry = ref
@@ -15,21 +15,21 @@ type
         order: seq[str]
 
 fn enabled(cache: BlockCache): bool =
-    return cache != nil and cache.capacityBytes > 0
+    return cache != nil && cache.capacityBytes > 0
 
 fn findEntryIndex(cache: BlockCache, key: str): int32 =
-    if cache == nil or key == nil:
+    if cache == nil || key == nil:
         return -1
     var i: int32 = 0
     while i < cache.entries.len:
         let entry = cache.entries[i]
-        if entry != nil and entry.key == key:
+        if entry != nil && entry.key == key:
             return i
         i = i + 1
     return -1
 
 fn findOrderIndex(cache: BlockCache, key: str): int32 =
-    if cache == nil or key == nil:
+    if cache == nil || key == nil:
         return -1
     var i: int32 = 0
     while i < cache.order.len:
@@ -39,7 +39,7 @@ fn findOrderIndex(cache: BlockCache, key: str): int32 =
     return -1
 
 fn removeEntryAt(entries: var seq[CacheEntry], idx: int32) =
-    if idx < 0 or idx >= entries.len:
+    if idx < 0 || idx >= entries.len:
         return
     let last: int32 = entries.len - 1
     var i: int32 = idx
@@ -49,7 +49,7 @@ fn removeEntryAt(entries: var seq[CacheEntry], idx: int32) =
     entries.setLen(last)
 
 fn removeOrderAt(order: var seq[str], idx: int32) =
-    if idx < 0 or idx >= order.len:
+    if idx < 0 || idx >= order.len:
         return
     let last: int32 = order.len - 1
     var i: int32 = idx
@@ -65,9 +65,9 @@ fn touchOrder(cache: BlockCache, key: str) =
     cache.order.add(key)
 
 fn evictIfNeeded(cache: BlockCache) =
-    if not enabled(cache):
+    if ! enabled(cache):
         return
-    while cache.usageBytes > cache.capacityBytes and cache.order.len > 0:
+    while cache.usageBytes > cache.capacityBytes && cache.order.len > 0:
         let victim = cache.order[0]
         let idx = findEntryIndex(cache, victim)
         if idx >= 0:
@@ -88,7 +88,7 @@ fn NewBlockCache(capacityBytes: int32): BlockCache =
     )
 
 fn Get(cache: BlockCache, key: str): option.Option[seq[uint8]] =
-    if not enabled(cache) or key == nil or strings.len(key) == 0:
+    if ! enabled(cache) || key == nil || strings.len(key) == 0:
         return option.none(seq[uint8])
     let idx = findEntryIndex(cache, key)
     if idx < 0:
@@ -100,9 +100,9 @@ fn Get(cache: BlockCache, key: str): option.Option[seq[uint8]] =
     return option.some(entry.payload)
 
 fn Put(cache: BlockCache, key: str, payload: seq[uint8]) =
-    if not enabled(cache) or key == nil or strings.len(key) == 0:
+    if ! enabled(cache) || key == nil || strings.len(key) == 0:
         return
-    if payload.len == 0 or payload.len > cache.capacityBytes:
+    if payload.len == 0 || payload.len > cache.capacityBytes:
         return
     let existingIdx = findEntryIndex(cache, key)
     if existingIdx >= 0:

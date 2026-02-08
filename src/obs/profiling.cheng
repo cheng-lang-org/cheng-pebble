@@ -1,14 +1,14 @@
 module pebble_obs_profiling
 
-import "./events.cheng" as obs_events
-import "./metrics.cheng" as obs_metrics
-import "./types.cheng" as obs_types
-import cheng / stdlib / bootstrap / std / times as times
-import cheng / stdlib / bootstrap / strings as strings
+import cheng/pebble/obs/events as obs_events
+import cheng/pebble/obs/metrics as obs_metrics
+import cheng/pebble/obs/types as obs_types
+import std/std/times as times
+import std/strings as strings
 
 
 type
-    ProfilingSink = fn (name: str, durationSeconds: float64)
+    ProfilingSink = fn(name: str, durationSeconds: float64)
 
     Profiler = ref
         enabled: bool
@@ -22,7 +22,7 @@ fn NewProfiler(): Profiler =
     return profiler
 
 fn RegisterSink(profiler: Profiler, sink: ProfilingSink) =
-    if profiler == nil or sink == nil:
+    if profiler == nil || sink == nil:
         return
     profiler.sinks.add(sink)
 
@@ -41,8 +41,8 @@ fn ProfileBlock(profiler: Profiler,
                 bus: obs_events.EventBus,
                 name: str,
                 labels: seq[obs_types.LabelPair] = @[],
-                body: fn ()) =
-    if profiler == nil or not profiler.enabled or body == nil:
+                body: fn()) =
+    if profiler == nil || ! profiler.enabled || body == nil:
         if body != nil:
             body()
         return
@@ -59,7 +59,7 @@ fn ProfileBlock(profiler: Profiler,
             timestamp: times.now(),
             message: msg,
             tags: obs_types.NewLabelPairs(labels),
-            payload: "duration_seconds=" & strings.`$`(elapsed)
+            payload: "duration_seconds=" & toString(elapsed)
         )
         obs_events.Publish(bus, event)
     notifySinks(profiler, name, elapsed)

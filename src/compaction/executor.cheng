@@ -1,12 +1,12 @@
 module pebble_compaction_executor
 
-import "./types.cheng" as comp_types
-import "../core/types.cheng" as core_types
-import "../manifest/types.cheng" as man_types
-import "../sstable/table_reader.cheng" as table_reader
-import "../sstable/table_builder.cheng" as table_builder
-import "../sstable/types.cheng" as sstable_types
-import cheng / stdlib / bootstrap / std / times as times
+import cheng/pebble/compaction/types as comp_types
+import cheng/pebble/core/types as core_types
+import cheng/pebble/manifest/types as man_types
+import cheng/pebble/sstable/table_reader as table_reader
+import cheng/pebble/sstable/table_builder as table_builder
+import cheng/pebble/sstable/types as sstable_types
+import std/std/times as times
 
 
 type
@@ -15,8 +15,8 @@ type
         value: str
         sourceOrder: int32
 
-    CompactionInputProvider = fn (plan: comp_types.CompactionPlan): seq[table_reader.TableReader]
-    CompactionOutputWriter = fn (plan: comp_types.CompactionPlan,
+    CompactionInputProvider = fn(plan: comp_types.CompactionPlan): seq[table_reader.TableReader]
+    CompactionOutputWriter = fn(plan: comp_types.CompactionPlan,
                                  artifacts: sstable_types.TableBuildArtifacts): man_types.FileMetadata
 
     CompactionExecutor = ref
@@ -65,7 +65,7 @@ fn dedupEntries(entries: seq[CompactionEntry],
                 comparator: core_types.Comparator): seq[CompactionEntry] =
     if entries.len == 0:
         return @[]
-    var out: seq[CompactionEntry] = @[]
+    var out: seq[CompactionEntry]
     var i: int32 = 0
     while i < entries.len:
         let entry = entries[i]
@@ -82,7 +82,7 @@ fn dedupEntries(entries: seq[CompactionEntry],
     return out
 
 fn collectEntries(readers: seq[table_reader.TableReader]): seq[CompactionEntry] =
-    var out: seq[CompactionEntry] = @[]
+    var out: seq[CompactionEntry]
     var i: int32 = 0
     while i < readers.len:
         let reader = readers[i]
@@ -180,5 +180,5 @@ fn ExecutePlan(exec: CompactionExecutor,
     )
 
 fn Handler(exec: CompactionExecutor): comp_types.CompactionJobHandler =
-    return fn (plan: comp_types.CompactionPlan): comp_types.CompactionResult =
+    return fn(plan: comp_types.CompactionPlan): comp_types.CompactionResult =
         return ExecutePlan(exec, plan)

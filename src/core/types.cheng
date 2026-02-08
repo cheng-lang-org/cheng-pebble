@@ -1,7 +1,7 @@
 module pebble_core_types
 
-import cheng / stdlib / bootstrap / core / option as option
-import cheng / stdlib / bootstrap / tables as tables
+import std/option as option
+import std/tables as tables
 
 const
     UnknownComparator = ""
@@ -18,7 +18,7 @@ type
 
     Key = str
     SequenceNumber = uint64
-    Comparator = fn (a: Key, b: Key): int32
+    Comparator = fn(a: Key, b: Key): int32
 
     ComparatorRegistry = ref
         defaultComp: Comparator

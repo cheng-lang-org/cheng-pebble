@@ -1,8 +1,8 @@
 module pebble_tooling
 
-import "./tooling/cli_core.cheng" as cli_core
-import "./tooling/core_commands.cheng" as core_commands
-import "./tooling/sstable_commands.cheng" as sstable_commands
+import cheng/pebble/tooling/cli_core as cli_core
+import cheng/pebble/tooling/core_commands as core_commands
+import cheng/pebble/tooling/sstable_commands as sstable_commands
 
 
 type

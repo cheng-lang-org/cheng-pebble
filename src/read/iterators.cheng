@@ -1,10 +1,10 @@
 module pebble_read_iterators
 
-import "../core/types.cheng" as core_types
-import "../read/types.cheng" as read_types
-import cheng / stdlib / bootstrap / core / option as option
-import cheng / stdlib / bootstrap / strings as strings
-import cheng / stdlib / bootstrap / tables as tables
+import cheng/pebble/core/types as core_types
+import cheng/pebble/read/types as read_types
+import std/option as option
+import std/strings as strings
+import std/tables as tables
 
 type
     ReadIterator = ref
@@ -28,7 +28,7 @@ type
         kind: read_types.ReadSourceKind
 
 fn startsWith(text: str, prefix: str): bool =
-    if prefix == nil or strings.len(prefix) == 0:
+    if prefix == nil || strings.len(prefix) == 0:
         return true
     if text == nil:
         return false
@@ -74,8 +74,8 @@ fn materializeEntries(sources: openArray[read_types.ReadSource],
                                       kind: source.kind)
             if tables.TableHas[Candidate](best, keyBytes):
                 let existing = tables.TableGet[Candidate](best, keyBytes)
-                if candidate.priority < existing.priority or
-                   (candidate.priority == existing.priority and candidate.order < existing.order):
+                if candidate.priority < existing.priority ||
+                   (candidate.priority == existing.priority && candidate.order < existing.order):
                     tables.TablePut[Candidate](best, keyBytes, candidate)
             else:
                 tables.TablePut[Candidate](best, keyBytes, candidate)
@@ -114,7 +114,7 @@ fn rebuildFiltered(it: ReadIterator) =
     var i: int32 = 0
     while i < it.allEntries.len:
         let entry = it.allEntries[i]
-        if inRange(it.bounds, it.comparator, entry.key) and
+        if inRange(it.bounds, it.comparator, entry.key) &&
            matchesPrefix(it.prefixFilter, entry.key):
             it.filtered.add(entry)
         i = i + 1
@@ -183,7 +183,7 @@ fn Valid(it: ReadIterator): bool =
     return it.validFlag
 
 fn CurrentEntry(it: ReadIterator): read_types.MaterializedEntry =
-    if not Valid(it):
+    if ! Valid(it):
         raise newException(read_types.ReadError, "iterator is not valid")
     return it.filtered[it.idx]
 
@@ -194,7 +194,7 @@ fn Value(it: ReadIterator): str =
     return CurrentEntry(it).value
 
 fn position(it: ReadIterator, newIdx: int32): bool =
-    if newIdx >= 0 and newIdx < it.filtered.len:
+    if newIdx >= 0 && newIdx < it.filtered.len:
         it.idx = newIdx
         it.validFlag = true
         return true
@@ -217,12 +217,12 @@ fn Last(it: ReadIterator): bool =
     return position(it, it.filtered.len - 1)
 
 fn Next(it: ReadIterator): bool =
-    if not Valid(it):
+    if ! Valid(it):
         return First(it)
     return position(it, it.idx + 1)
 
 fn Prev(it: ReadIterator): bool =
-    if not Valid(it):
+    if ! Valid(it):
         return Last(it)
     return position(it, it.idx - 1)
 
@@ -234,7 +234,7 @@ fn SeekGE(it: ReadIterator, key: core_types.Key): bool =
     var lo: int32 = 0
     var hi: int32 = it.filtered.len
     while lo < hi:
-        let mid = (lo + hi) shr 1
+        let mid = (lo + hi) >> 1
         let cmp = it.comparator(it.filtered[mid].key, key)
         if cmp < 0:
             lo = mid + 1
@@ -250,7 +250,7 @@ fn SeekLT(it: ReadIterator, key: core_types.Key): bool =
     var lo: int32 = 0
     var hi: int32 = it.filtered.len
     while lo < hi:
-        let mid = (lo + hi) shr 1
+        let mid = (lo + hi) >> 1
         let cmp = it.comparator(it.filtered[mid].key, key)
         if cmp < 0:
             lo = mid + 1
@@ -269,14 +269,14 @@ iterator Range(it: ReadIterator,
         return
     let effectivePrefix = if option.IsSome(prefix): prefix else: it.prefixFilter
     let effectiveRange =
-        if option.IsSome(range.lower) or option.IsSome(range.upper): range else: it.bounds
+        if option.IsSome(range.lower) || option.IsSome(range.upper): range else: it.bounds
     var idx: int32 = 0
     while idx < it.filtered.len:
         let entry = it.filtered[idx]
-        if not inRange(effectiveRange, it.comparator, entry.key):
+        if ! inRange(effectiveRange, it.comparator, entry.key):
             idx = idx + 1
             continue
-        if not matchesPrefix(effectivePrefix, entry.key):
+        if ! matchesPrefix(effectivePrefix, entry.key):
             idx = idx + 1
             continue
         yield entry

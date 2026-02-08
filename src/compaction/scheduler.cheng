@@ -1,14 +1,14 @@
 module pebble_compaction_scheduler
 
-import "./types.cheng" as comp_types
-import "./planner.cheng" as comp_planner
-import "../runtime/executor.cheng" as exec
-import "../runtime/resource_manager.cheng" as resource
-import "../manifest/version.cheng" as man_version
-import cheng / stdlib / bootstrap / core / option as option
-import cheng / stdlib / bootstrap / seqs as seqs
-import cheng / stdlib / bootstrap / tables as tables
-import cheng / stdlib / bootstrap / strings as strings
+import cheng/pebble/compaction/types as comp_types
+import cheng/pebble/compaction/planner as comp_planner
+import cheng/pebble/runtime/executor as exec
+import cheng/pebble/runtime/resource_manager as resource
+import cheng/pebble/manifest/version as man_version
+import std/option as option
+import std/seqs as seqs
+import std/tables as tables
+import std/strings as strings
 
 
 type
@@ -37,6 +37,15 @@ type
         planRegistry: tables.Table[comp_types.CompactionPlan]
         planResults: tables.Table[comp_types.CompactionResult]
 
+    ReleaseTicketReq = ref
+        sched: CompactionScheduler
+        ticketOpt: option.Option[resource.ResourceTicket]
+
+    FailureEventReq = ref
+        sched: CompactionScheduler
+        planId: uint64
+        message: str
+
 fn normalizeConfig(cfg: CompactionSchedulerConfig): CompactionSchedulerConfig =
     var out = cfg
     if out.maxConcurrentJobs <= 0:
@@ -46,10 +55,10 @@ fn normalizeConfig(cfg: CompactionSchedulerConfig): CompactionSchedulerConfig =
     return out
 
 fn uint64ToStr(value: uint64): str =
-    return strings.`$`(value)
+    return toString(value)
 
 fn int64ToStr(value: int64): str =
-    return strings.`$`(value)
+    return toString(value)
 
 fn planKey(planId: uint64): str =
     return uint64ToStr(planId)
@@ -58,10 +67,10 @@ fn requestTicket(sched: CompactionScheduler): TicketResult =
     if sched == nil:
         return TicketResult(granted: false, ticket: option.none(resource.ResourceTicket))
     let rm = sched.cfg.resourceManager
-    if rm == nil or sched.cfg.acquireAmount <= 0:
+    if rm == nil || sched.cfg.acquireAmount <= 0:
         return TicketResult(granted: true, ticket: option.none(resource.ResourceTicket))
     let idx: int32 = int32(sched.cfg.resourceKind)
-    if not rm.hasQuota[idx]:
+    if ! rm.hasQuota[idx]:
         return TicketResult(granted: true, ticket: option.none(resource.ResourceTicket))
     if resource.IsSoftExceeded(rm, sched.cfg.resourceKind):
         return TicketResult(granted: false, ticket: option.none(resource.ResourceTicket))
@@ -69,10 +78,15 @@ fn requestTicket(sched: CompactionScheduler): TicketResult =
     return TicketResult(granted: true, ticket: option.some(ticket))
 
 fn releaseTicket(sched: CompactionScheduler, ticketOpt: option.Option[resource.ResourceTicket]) =
-    if sched == nil or sched.cfg.resourceManager == nil:
+    if sched == nil || sched.cfg.resourceManager == nil:
         return
     if option.IsSome(ticketOpt):
         resource.Release(sched.cfg.resourceManager, option.Get(ticketOpt))
+
+fn releaseTicketReq(req: ReleaseTicketReq) =
+    if req == nil:
+        return
+    releaseTicket(req.sched, req.ticketOpt)
 
 fn recordEvent(sched: CompactionScheduler,
                kind: comp_types.CompactionEventKind,
@@ -94,6 +108,12 @@ fn recordEvent(sched: CompactionScheduler,
         while i < overflow:
             seqs.delete[comp_types.CompactionEvent](&sched.events, 0)
             i = i + 1
+
+fn emitFailureEvent(req: FailureEventReq) =
+    if req == nil:
+        return
+    recordEvent(req.sched, comp_types.CompactionFailure, req.planId,
+        "plan " & uint64ToStr(req.planId) & " failed", req.message)
 
 fn updateMetrics(sched: CompactionScheduler, result: comp_types.CompactionResult) =
     sched.metrics.totalJobs = sched.metrics.totalJobs + 1
@@ -136,10 +156,12 @@ fn runPlan(sched: CompactionScheduler,
     if sched == nil:
         return
     let key = planKey(plan.id)
+    let releaseReq = ReleaseTicketReq(sched: sched, ticketOpt: ticketOpt)
     tables.TablePut[comp_types.CompactionPlan](sched.planRegistry, key, plan)
     recordEvent(sched, comp_types.CompactionStart, plan.id,
         "plan " & uint64ToStr(plan.id) & " start", plan.strategy)
     sched.activeJobs = sched.activeJobs + 1
+    var caught: CatchableError = nil
     try:
         let result = sched.handler(plan)
         tables.TablePut[comp_types.CompactionResult](sched.planResults, key, result)
@@ -149,35 +171,36 @@ fn runPlan(sched: CompactionScheduler,
             "bytesRead=" & int64ToStr(result.bytesRead) &
             ",bytesWritten=" & int64ToStr(result.bytesWritten))
     except CatchableError as err:
-        recordEvent(sched, comp_types.CompactionFailure, plan.id,
-            "plan " & uint64ToStr(plan.id) & " failed", err.msg)
-        raise
-    finally:
-        if sched.activeJobs > 0:
-            sched.activeJobs = sched.activeJobs - 1
-        releaseTicket(sched, ticketOpt)
+        caught = err
+    if sched.activeJobs > 0:
+        sched.activeJobs = sched.activeJobs - 1
+    releaseTicketReq(releaseReq)
+    if caught != nil:
+        let failure = FailureEventReq(sched: sched, planId: plan.id, message: caught.msg)
+        emitFailureEvent(failure)
+        raise caught
 
 fn ScheduleNext(sched: CompactionScheduler,
                 version: man_version.Version): option.Option[comp_types.CompactionPlan] =
-    if sched == nil or sched.planner == nil:
+    if sched == nil || sched.planner == nil:
         return option.none(comp_types.CompactionPlan)
     if sched.activeJobs >= sched.cfg.maxConcurrentJobs:
         return option.none(comp_types.CompactionPlan)
     if sched.pending.len > 0:
         let plan = sched.pending[0]
         let ticket = requestTicket(sched)
-        if not ticket.granted:
+        if ! ticket.granted:
             return option.none(comp_types.CompactionPlan)
         sched.pending.delete(0)
         runPlan(sched, plan, ticket.ticket)
         return option.some(plan)
     var telemetry = comp_types.DefaultTelemetry()
     let planOpt = comp_planner.NextPlan(sched.planner, version, telemetry)
-    if not option.IsSome(planOpt):
+    if ! option.IsSome(planOpt):
         return option.none(comp_types.CompactionPlan)
     let plan = option.Get(planOpt)
     let ticket = requestTicket(sched)
-    if not ticket.granted:
+    if ! ticket.granted:
         sched.pending.add(plan)
         return option.none(comp_types.CompactionPlan)
     runPlan(sched, plan, ticket.ticket)

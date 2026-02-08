@@ -1,59 +1,594 @@
 module pebble_batch_db
 
-import "../core/types.cheng" as core_types
-import "../mem/memtable.cheng" as memtable
-import "../mem/types.cheng" as mem_types
-import "../batch/types.cheng" as batch_types
-import "../batch/batch.cheng" as batch_module
-import "../runtime/executor.cheng" as exec
-import "../wal/writer.cheng" as wal_writer
-import cheng / stdlib / bootstrap / core / option as option
+import cheng/pebble/core/types as core_types
+import cheng/pebble/mem/memtable as memtable
+import cheng/pebble/mem/types as mem_types
+import cheng/pebble/batch/types as batch_types
+import cheng/pebble/batch/batch as batch_module
+import cheng/pebble/runtime/executor as exec
+import cheng/pebble/wal/writer as wal_writer
+import cheng/pebble/wal/reader as wal_reader
+import cheng/pebble/manifest/version_set as man_set
+import cheng/pebble/manifest/version as man_version
+import cheng/pebble/manifest/version_edit as man_edit
+import cheng/pebble/manifest/types as man_types
+import cheng/pebble/sstable/table_builder as table_builder
+import cheng/pebble/sstable/table_reader as table_reader
+import std/bytes as bytes
+import std/option as option
+import std/os as os
+import std/strings as strings
+import std/tables as tables
+import std/system as sys
+
+const
+    PersistDeleteTag = "d:"
+    PersistValueTag = "v:"
+    PersistHistoryTag = "h|"
+    PersistSeqTag = "s:"
+    CompactTriggerFileCount = 4
 
 
 type
+    PersistedVersion =
+        seq: uint64
+        value: option.Option[str]
+
+    PersistedLookup =
+        found: bool
+        seq: uint64
+        value: option.Option[str]
+
+    PersistedTable =
+        level: man_types.Level
+        metadata: man_types.FileMetadata
+        path: str
+        reader: table_reader.TableReader
+
+    FlushEntry =
+        key: core_types.Key
+        versions: seq[PersistedVersion]
+
+    CompactionEntry =
+        key: core_types.Key
+        versions: seq[PersistedVersion]
+
+    WalSegment =
+        index: int32
+        path: str
+
+    ParseUint64Result = tuple(ok: bool, value: uint64)
+    ParseInt32Result = tuple(ok: bool, value: int32)
+
     DB = ref
         cfg: batch_types.DBConfig
         mem: mem_types.MemTable
         nextSeq: uint64
         inflight: int32
         closed: bool
-
-fn InitDB(cfg: batch_types.DBConfig): DB =
-    var normalized = cfg
-    batch_types.EnsureMemConfig(normalized)
-    if normalized.memConfig.comparator == nil:
-        normalized.memConfig.comparator = core_types.CompareBytewise
-    let mem = memtable.InitMemTable(normalized.memConfig)
-    var db: DB = new[DB]()
-    if db != nil:
-        db.cfg = normalized
-        db.mem = mem
-        db.nextSeq = 0
-        db.inflight = 0
-        db.closed = false
-    return db
+        manifest: man_set.VersionSet
+        wal: wal_writer.WalWriter
+        ownsWal: bool
+        persisted: seq[PersistedTable]
 
 fn ensureOpen(db: DB) =
-    if db == nil or db.closed:
+    if db == nil || db.closed:
         raise newException(batch_types.BatchError, "database is closed")
 
-fn LatestSnapshot(db: DB): batch_types.Snapshot =
-    ensureOpen(db)
-    return batch_types.Snapshot(seq: core_types.ToSequence(db.nextSeq))
+fn maxInt32(a: int32, b: int32): int32 =
+    if a > b:
+        return a
+    return b
 
-fn Get(db: DB, key: core_types.Key, snapshot: batch_types.Snapshot): option.Option[str] =
-    ensureOpen(db)
-    let seq = if core_types.ToUint64(snapshot.seq) == 0: core_types.ToSequence(db.nextSeq) else: snapshot.seq
-    return memtable.Get(db.mem, key, seq)
+fn startsWith(text: str, prefix: str): bool =
+    if prefix == nil || strings.len(prefix) == 0:
+        return true
+    if text == nil:
+        return false
+    if strings.len(text) < strings.len(prefix):
+        return false
+    var i: int32 = 0
+    while i < strings.len(prefix):
+        if strings.charAt(text, i) != strings.charAt(prefix, i):
+            return false
+        i = i + 1
+    return true
 
-fn GetLatest(db: DB, key: core_types.Key): option.Option[str] =
-    return Get(db, key, LatestSnapshot(db))
+fn endsWith(text: str, suffix: str): bool =
+    if suffix == nil || strings.len(suffix) == 0:
+        return true
+    if text == nil:
+        return false
+    let n = strings.len(text)
+    let m = strings.len(suffix)
+    if n < m:
+        return false
+    var i: int32 = 0
+    while i < m:
+        if strings.charAt(text, n - m + i) != strings.charAt(suffix, i):
+            return false
+        i = i + 1
+    return true
 
-fn ApproxMemtableBytes(db: DB): int32 =
-    ensureOpen(db)
-    if db.mem == nil or db.mem.base == nil:
-        return 0
-    return db.mem.base.approxBytes
+fn parseUint64Strict(text: str): ParseUint64Result =
+    if text == nil || strings.len(text) == 0:
+        return ParseUint64Result(ok: false, value: uint64(0))
+    var value: uint64 = 0
+    var i: int32 = 0
+    while i < strings.len(text):
+        let ch = strings.charAt(text, i)
+        if ch < '0' || ch > '9':
+            return ParseUint64Result(ok: false, value: uint64(0))
+        value = value * uint64(10) + uint64(sys.ord(ch) - 48)
+        i = i + 1
+    return ParseUint64Result(ok: true, value: value)
+
+fn parseInt32Strict(text: str): ParseInt32Result =
+    let parsed = parseUint64Strict(text)
+    if ! parsed.ok:
+        return ParseInt32Result(ok: false, value: 0)
+    if parsed.value > uint64(2147483647):
+        return ParseInt32Result(ok: false, value: 0)
+    return ParseInt32Result(ok: true, value: int32(parsed.value))
+
+fn splitBy(text: str, delim: char): seq[str] =
+    var out: seq[str]
+    var part: str = ""
+    var i: int32 = 0
+    while i < strings.len(text):
+        let ch = strings.charAt(text, i)
+        if ch == delim:
+            out.add(part)
+            part = ""
+        else:
+            part = part & strings.charToStr(ch)
+        i = i + 1
+    out.add(part)
+    return out
+
+fn persistentRequested(cfg: batch_types.DBConfig): bool =
+    return strings.len(cfg.walPath) > 0 ||
+        strings.len(cfg.manifestPath) > 0 || strings.len(cfg.sstableDir) > 0
+
+fn ensureDir(path: str) =
+    if strings.len(path) == 0:
+        return
+    if ! os.dirExists(path):
+        os.createDir(path)
+
+fn normalizePersistentConfig(cfg: var batch_types.DBConfig) =
+    if cfg.flushLevel < 0:
+        cfg.flushLevel = 0
+    if cfg.tableBlockSize <= 0:
+        cfg.tableBlockSize = 32 * 1024
+    if cfg.tableBloomBitsPerKey < 0:
+        cfg.tableBloomBitsPerKey = 0
+    if ! persistentRequested(cfg):
+        return
+    if strings.len(cfg.sstableDir) == 0:
+        if strings.len(cfg.manifestPath) > 0:
+            cfg.sstableDir = os.parentDir(cfg.manifestPath)
+        elif strings.len(cfg.walPath) > 0:
+            cfg.sstableDir = os.parentDir(cfg.walPath)
+        else:
+            cfg.sstableDir = "."
+    if strings.len(cfg.sstableDir) == 0:
+        cfg.sstableDir = "."
+    if strings.len(cfg.manifestPath) == 0:
+        cfg.manifestPath = os.joinPath(cfg.sstableDir, "MANIFEST")
+    if strings.len(cfg.walPath) == 0 && cfg.walWriter == nil:
+        cfg.walPath = os.joinPath(cfg.sstableDir, "WAL.log")
+
+fn comparator(db: DB): core_types.Comparator =
+    if db != nil && db.cfg.memConfig.comparator != nil:
+        return db.cfg.memConfig.comparator
+    return core_types.CompareBytewise
+
+fn hexDigit(value: int32): char =
+    if value < 10:
+        return sys.chr(48 + value)
+    return sys.chr(87 + value)
+
+fn hexValue(c: char): int32 =
+    if c >= '0' && c <= '9':
+        return sys.ord(c) - 48
+    if c >= 'a' && c <= 'f':
+        return sys.ord(c) - 87
+    if c >= 'A' && c <= 'F':
+        return sys.ord(c) - 55
+    return -1
+
+fn encodeHex(text: str): str =
+    if text == nil || strings.len(text) == 0:
+        return ""
+    var out: str = ""
+    var i: int32 = 0
+    while i < strings.len(text):
+        let ch = strings.charAt(text, i)
+        let value = sys.ord(ch) & 0xFF
+        out = out + strings.charToStr(hexDigit(value / 16))
+        out = out + strings.charToStr(hexDigit(value % 16))
+        i = i + 1
+    return out
+
+fn decodeHex(text: str): str =
+    if text == nil || strings.len(text) == 0:
+        return ""
+    if (strings.len(text) % 2) != 0:
+        raise newException(batch_types.BatchError, "invalid hex payload length")
+    var out: str = ""
+    var i: int32 = 0
+    while i < strings.len(text):
+        let hi = hexValue(strings.charAt(text, i))
+        let lo = hexValue(strings.charAt(text, i + 1))
+        if hi < 0 || lo < 0:
+            raise newException(batch_types.BatchError, "invalid hex payload")
+        let value = hi * 16 + lo
+        out = out + strings.charToStr(sys.chr(value))
+        i = i + 2
+    return out
+
+fn normalizeVersions(versions: seq[PersistedVersion]): seq[PersistedVersion] =
+    if versions.len == 0:
+        return @[]
+    var sorted = newSeq[PersistedVersion](versions.len)
+    var i: int32 = 0
+    while i < versions.len:
+        sorted[i] = versions[i]
+        i = i + 1
+    var a: int32 = 0
+    while a < sorted.len:
+        var b: int32 = a + 1
+        while b < sorted.len:
+            if sorted[b].seq > sorted[a].seq:
+                let tmp = sorted[a]
+                sorted[a] = sorted[b]
+                sorted[b] = tmp
+            b = b + 1
+        a = a + 1
+    var out: seq[PersistedVersion]
+    var j: int32 = 0
+    while j < sorted.len:
+        let current = sorted[j]
+        if out.len == 0 || current.seq != out[out.len - 1].seq:
+            out.add(current)
+        j = j + 1
+    return out
+
+fn encodePersistedVersions(versions: seq[PersistedVersion]): str =
+    let normalized = normalizeVersions(versions)
+    var out = PersistHistoryTag & toString(normalized.len)
+    var i: int32 = 0
+    while i < normalized.len:
+        let ver = normalized[i]
+        out = out & "|" & toString(ver.seq) & "|"
+        if option.IsSome(ver.value):
+            out = out & "v|" & encodeHex(option.Get(ver.value))
+        else:
+            out = out & "d|"
+        i = i + 1
+    return out
+
+fn decodeHistoryFormat(raw: str): seq[PersistedVersion] =
+    let parts = splitBy(raw, '|')
+    if parts.len < 2 || parts[0] != "h":
+        raise newException(batch_types.BatchError, "invalid persisted history payload")
+    let countInfo = parseInt32Strict(parts[1])
+    if ! countInfo.ok || countInfo.value < 0:
+        raise newException(batch_types.BatchError, "invalid persisted history count")
+    let count = countInfo.value
+    var idx: int32 = 2
+    var i: int32 = 0
+    var versions: seq[PersistedVersion]
+    while i < count:
+        if idx + 2 >= parts.len:
+            raise newException(batch_types.BatchError, "truncated persisted history payload")
+        let seqInfo = parseUint64Strict(parts[idx])
+        if ! seqInfo.ok:
+            raise newException(batch_types.BatchError, "invalid persisted version sequence")
+        let kind = parts[idx + 1]
+        let payload = parts[idx + 2]
+        if kind == "d":
+            versions.add(PersistedVersion(seq: seqInfo.value, value: option.none(str)))
+        elif kind == "v":
+            versions.add(PersistedVersion(seq: seqInfo.value, value: option.some(decodeHex(payload))))
+        else:
+            raise newException(batch_types.BatchError, "invalid persisted version kind")
+        idx = idx + 3
+        i = i + 1
+    return normalizeVersions(versions)
+
+fn decodeSeqTaggedFormat(raw: str): seq[PersistedVersion] =
+    if ! startsWith(raw, PersistSeqTag):
+        return @[]
+    if strings.len(raw) <= strings.len(PersistSeqTag):
+        return @[]
+    var pos: int32 = strings.len(PersistSeqTag)
+    while pos < strings.len(raw) && strings.charAt(raw, pos) != ':':
+        pos = pos + 1
+    if pos >= strings.len(raw):
+        return @[]
+    var seqText = ""
+    if pos > strings.len(PersistSeqTag):
+        seqText = raw[strings.len(PersistSeqTag)..pos - 1]
+    let seqInfo = parseUint64Strict(seqText)
+    if ! seqInfo.ok:
+        return @[]
+    var rest: str = ""
+    if pos + 1 < strings.len(raw):
+        rest = raw[pos + 1..strings.len(raw) - 1]
+    if rest == "d" || rest == "d:":
+        return @[PersistedVersion(seq: seqInfo.value, value: option.none(str))]
+    if startsWith(rest, PersistValueTag):
+        var payload = ""
+        if strings.len(rest) > strings.len(PersistValueTag):
+            payload = rest[strings.len(PersistValueTag)..strings.len(rest) - 1]
+        return @[PersistedVersion(seq: seqInfo.value, value: option.some(decodeHex(payload)))]
+    return @[PersistedVersion(seq: seqInfo.value, value: option.some(rest))]
+
+fn decodePersistedVersions(raw: str, fallbackSeq: uint64): seq[PersistedVersion] =
+    if raw == nil:
+        return @[]
+    if startsWith(raw, PersistHistoryTag):
+        return decodeHistoryFormat(raw)
+    let seqTagged = decodeSeqTaggedFormat(raw)
+    if seqTagged.len > 0:
+        return normalizeVersions(seqTagged)
+    if raw == PersistDeleteTag:
+        return @[PersistedVersion(seq: fallbackSeq, value: option.none(str))]
+    if startsWith(raw, PersistValueTag):
+        var payload = ""
+        if strings.len(raw) > strings.len(PersistValueTag):
+            payload = raw[strings.len(PersistValueTag)..strings.len(raw) - 1]
+        return @[PersistedVersion(seq: fallbackSeq, value: option.some(decodeHex(payload)))]
+    return @[PersistedVersion(seq: fallbackSeq, value: option.some(raw))]
+
+fn chooseVersionAt(versions: seq[PersistedVersion], snapshotSeq: uint64): PersistedLookup =
+    var out = PersistedLookup(found: false, seq: uint64(0), value: option.none(str))
+    var i: int32 = 0
+    while i < versions.len:
+        let ver = versions[i]
+        if ver.seq <= snapshotSeq:
+            if ! out.found || ver.seq > out.seq:
+                out.found = true
+                out.seq = ver.seq
+                out.value = ver.value
+        i = i + 1
+    return out
+
+fn bytesToStr(data: seq[uint8]): str =
+    if data.len == 0:
+        return ""
+    var out: str = ""
+    var i: int32 = 0
+    while i < data.len:
+        out = out + strings.charToStr(sys.chr(int32(data[i])))
+        i = i + 1
+    return out
+
+fn byteBufferToSeq(buf: bytes.ByteBuffer): seq[uint8] =
+    var out = newSeq[uint8](int(buf.len))
+    var i: int32 = 0
+    while i < buf.len:
+        out[i] = uint8(bytes.bufByteAt(buf, i))
+        i = i + 1
+    return out
+
+fn readFileBytes(path: str): seq[uint8] =
+    let dataBuf = bytes.readFileBytes(path)
+    if dataBuf.len <= 0:
+        return @[]
+    return byteBufferToSeq(dataBuf)
+
+fn writeFileBytes(path: str, data: seq[uint8]) =
+    let parent = os.parentDir(path)
+    if strings.len(parent) > 0:
+        ensureDir(parent)
+    os.writeFile(path, bytesToStr(data))
+
+fn sstablePath(dir: str, level: man_types.Level, fileNum: man_types.FileNumber): str =
+    let name = "L" & toString(level) & "-" & toString(man_types.FileNumberToUint64(fileNum)) & ".sst"
+    return os.joinPath(dir, name)
+
+fn sortPersistedTables(entries: var seq[PersistedTable]) =
+    if entries.len <= 1:
+        return
+    var i: int32 = 0
+    while i < entries.len:
+        var j: int32 = i + 1
+        while j < entries.len:
+            let leftSeq = core_types.ToUint64(entries[i].metadata.largestSeq)
+            let rightSeq = core_types.ToUint64(entries[j].metadata.largestSeq)
+            let leftNum = man_types.FileNumberToUint64(entries[i].metadata.fileNum)
+            let rightNum = man_types.FileNumberToUint64(entries[j].metadata.fileNum)
+            var swapIt = false
+            if rightSeq > leftSeq:
+                swapIt = true
+            elif rightSeq == leftSeq && rightNum > leftNum:
+                swapIt = true
+            if swapIt:
+                let tmp = entries[i]
+                entries[i] = entries[j]
+                entries[j] = tmp
+            j = j + 1
+        i = i + 1
+
+fn keyInRange(comp: core_types.Comparator,
+              key: core_types.Key,
+              meta: man_types.FileMetadata): bool =
+    if comp(key, meta.smallest) < 0:
+        return false
+    if comp(key, meta.largest) > 0:
+        return false
+    return true
+
+fn walSegmentIndex(basePath: str, candidatePath: str): option.Option[int32] =
+    if candidatePath == basePath:
+        return option.some(0)
+    let baseParts = os.splitFile(basePath)
+    let candParts = os.splitFile(candidatePath)
+    if candParts.ext != baseParts.ext:
+        return option.none(int32)
+    let prefix = baseParts.name & "."
+    if ! startsWith(candParts.name, prefix):
+        return option.none(int32)
+    if strings.len(candParts.name) <= strings.len(prefix):
+        return option.none(int32)
+    let text = candParts.name[strings.len(prefix)..strings.len(candParts.name) - 1]
+    let parsed = parseInt32Strict(text)
+    if ! parsed.ok || parsed.value <= 0:
+        return option.none(int32)
+    return option.some(parsed.value)
+
+fn sortWalSegments(segments: var seq[WalSegment]) =
+    if segments.len <= 1:
+        return
+    var i: int32 = 0
+    while i < segments.len:
+        var j: int32 = i + 1
+        while j < segments.len:
+            if segments[j].index < segments[i].index:
+                let tmp = segments[i]
+                segments[i] = segments[j]
+                segments[j] = tmp
+            j = j + 1
+        i = i + 1
+
+fn listWalSegments(basePath: str): seq[WalSegment] =
+    if strings.len(basePath) == 0:
+        return @[]
+    var scanDir = "."
+    let parent = os.parentDir(basePath)
+    if strings.len(parent) > 0:
+        scanDir = parent
+    if ! os.dirExists(scanDir):
+        return @[]
+    var out: seq[WalSegment]
+    var seen = tables.TableInit[bool](16)
+    let entries = os.walkDir(scanDir)
+    var i: int32 = 0
+    while i < entries.len:
+        let entry = os.get_WalkDirEntry(entries, i)
+        if entry[0] != os.pcFile:
+            i = i + 1
+            continue
+        let candidate = entry[1]
+        if os.parentDir(candidate) != scanDir:
+            i = i + 1
+            continue
+        let idxOpt = walSegmentIndex(basePath, candidate)
+        if option.IsSome(idxOpt):
+            let idx = option.Get(idxOpt)
+            let key = toString(idx)
+            if ! tables.TableHas[bool](seen, key):
+                tables.TablePut[bool](seen, key, true)
+                out.add(WalSegment(index: idx, path: candidate))
+        i = i + 1
+    sortWalSegments(out)
+    return out
+
+fn removeRotatedWalSegments(basePath: str, activePath: str = "") =
+    let segments = listWalSegments(basePath)
+    var i: int32 = 0
+    while i < segments.len:
+        let seg = segments[i]
+        var shouldRemove = false
+        if strings.len(activePath) > 0:
+            shouldRemove = seg.path != activePath
+        else:
+            shouldRemove = seg.index > 0
+        if shouldRemove && os.fileExists(seg.path):
+            os.removeFile(seg.path)
+        i = i + 1
+
+fn loadTablesFromManifest(db: DB) =
+    db.persisted = @[]
+    if db.manifest == nil:
+        return
+    let version = man_set.CurrentVersion(db.manifest)
+    if version == nil:
+        return
+    let manifestSeq = core_types.ToUint64(version.lastSeqNum)
+    if manifestSeq > db.nextSeq:
+        db.nextSeq = manifestSeq
+    let comp = comparator(db)
+    let levels = man_version.LevelEntries(version)
+    var i: int32 = 0
+    while i < levels.len:
+        let levelEntry = levels[i]
+        var j: int32 = 0
+        while j < levelEntry.files.len:
+            let meta = levelEntry.files[j]
+            let path = sstablePath(db.cfg.sstableDir, levelEntry.level, meta.fileNum)
+            if ! os.fileExists(path):
+                raise newException(batch_types.BatchError,
+                    "manifest references missing SSTable: " & path)
+            let data = readFileBytes(path)
+            if data.len == 0:
+                raise newException(batch_types.BatchError,
+                    "empty SSTable referenced by manifest: " & path)
+            let reader = table_reader.NewTableReader(data, comp)
+            db.persisted.add(PersistedTable(
+                level: levelEntry.level,
+                metadata: meta,
+                path: path,
+                reader: reader
+            ))
+            j = j + 1
+        i = i + 1
+    sortPersistedTables(db.persisted)
+
+fn replayWal(db: DB) =
+    if db == nil || ! db.cfg.enableRecovery:
+        return
+    if strings.len(db.cfg.walPath) == 0:
+        return
+    let segments = listWalSegments(db.cfg.walPath)
+    if segments.len == 0:
+        return
+    var maxSeq = db.nextSeq
+    var i: int32 = 0
+    while i < segments.len:
+        let seg = segments[i]
+        let reader = wal_reader.NewWalReader(seg.path, db.cfg.replayTailTolerance)
+        var nextRecord = wal_reader.ReadNext(reader)
+        while option.IsSome(nextRecord):
+            let record = option.Get(nextRecord)
+            let entries = batch_module.FromWalPayload(record.payload)
+            var replayEntries: seq[mem_types.ApplyEntry]
+            var j: int32 = 0
+            while j < entries.len:
+                let entry = entries[j]
+                let seqValue = core_types.ToUint64(entry.seq)
+                if seqValue > maxSeq:
+                    replayEntries.add(entry)
+                    maxSeq = seqValue
+                j = j + 1
+            if replayEntries.len > 0:
+                memtable.PrecheckApplyBatch(db.mem, replayEntries)
+                memtable.ApplyBatch(db.mem, replayEntries)
+            nextRecord = wal_reader.ReadNext(reader)
+        wal_reader.Close(reader)
+        i = i + 1
+    db.nextSeq = maxSeq
+
+fn hasPersistentStore(db: DB): bool =
+    if db == nil:
+        return false
+    return db.manifest != nil && strings.len(db.cfg.sstableDir) > 0
+
+fn resolveOptions(db: DB, opts: batch_types.WriteOptions): batch_types.WriteOptions =
+    var result = opts
+    let isZero = (! result.sync) && (! result.disableWAL) &&
+        result.nudge == nil && result.timeoutMs == 0 &&
+        result.priority == mem_types.MemPriorityDefault
+    if isZero:
+        result = db.cfg.defaultOptions
+    if result.nudge == nil:
+        result.nudge = db.cfg.backpressure
+    if result.priority == mem_types.MemPriorityDefault:
+        result.priority = db.cfg.defaultOptions.priority
+    return result
 
 fn sendNudge(handler: batch_types.BackpressureHandler,
              reason: batch_types.BackpressureReason,
@@ -68,39 +603,420 @@ fn sendNudge(handler: batch_types.BackpressureHandler,
         memApproxBytes: memBytes
     ))
 
-fn isZero(opts: batch_types.WriteOptions): bool =
-    return (not opts.sync) and (not opts.disableWAL) and
-        opts.nudge == nil and opts.timeoutMs == 0 and
-        opts.priority == mem_types.MemPriorityDefault
+fn sortFlushEntries(entries: var seq[FlushEntry], comp: core_types.Comparator) =
+    if entries.len <= 1:
+        return
+    var i: int32 = 0
+    while i < entries.len:
+        var j: int32 = i + 1
+        while j < entries.len:
+            if comp(entries[j].key, entries[i].key) < 0:
+                let tmp = entries[i]
+                entries[i] = entries[j]
+                entries[j] = tmp
+            j = j + 1
+        i = i + 1
 
-fn resolveOptions(db: DB, opts: batch_types.WriteOptions): batch_types.WriteOptions =
-    var result = opts
-    if isZero(result):
-        result = db.cfg.defaultOptions
-    if result.nudge == nil:
-        result.nudge = db.cfg.backpressure
-    if result.priority == mem_types.MemPriorityDefault:
-        result.priority = db.cfg.defaultOptions.priority
-    return result
+fn collectFlushEntries(db: DB): seq[FlushEntry] =
+    if db == nil || db.mem == nil || db.mem.records.len == 0:
+        return @[]
+    var grouped = tables.TableInit[seq[PersistedVersion]](64)
+    var idx: int32 = db.mem.records.len - 1
+    while true:
+        let rec = db.mem.records[idx]
+        let keyBytes = core_types.ToBytes(rec.key)
+        var versions: seq[PersistedVersion]
+        if tables.TableHas[seq[PersistedVersion]](grouped, keyBytes):
+            versions = tables.TableGet[seq[PersistedVersion]](grouped, keyBytes)
+        let resolved = memtable.Lookup(db.mem, rec.key, rec.seq)
+        var value = option.none(str)
+        if resolved.found:
+            value = resolved.value
+        elif rec.kind != mem_types.MemValueDelete:
+            value = option.some(rec.value)
+        versions.add(PersistedVersion(
+            seq: core_types.ToUint64(rec.seq),
+            value: value
+        ))
+        tables.TablePut[seq[PersistedVersion]](grouped, keyBytes, versions)
+        if idx == 0:
+            break
+        idx = idx - 1
+    var out: seq[FlushEntry]
+    var tableIdx: int32 = 0
+    var key: str = ""
+    var versions: seq[PersistedVersion]
+    while tables.TableNext[seq[PersistedVersion]](grouped, &tableIdx, &key, &versions):
+        let normalized = normalizeVersions(versions)
+        if normalized.len > 0:
+            out.add(FlushEntry(
+                key: core_types.ToKey(key),
+                versions: normalized
+            ))
+    sortFlushEntries(out, comparator(db))
+    return out
+
+fn nextFileNumber(db: DB): man_types.FileNumber =
+    if db.manifest != nil:
+        let current = man_set.CurrentVersion(db.manifest)
+        if current != nil && current.nextFileNumber > 0:
+            return man_types.ToFileNumber(current.nextFileNumber)
+    var candidate: uint64 = 1
+    var i: int32 = 0
+    while i < db.persisted.len:
+        let value = man_types.FileNumberToUint64(db.persisted[i].metadata.fileNum) + uint64(1)
+        if value > candidate:
+            candidate = value
+        i = i + 1
+    return man_types.ToFileNumber(candidate)
+
+fn appendPersistedTable(db: DB,
+                        level: man_types.Level,
+                        metadata: man_types.FileMetadata,
+                        path: str,
+                        data: seq[uint8]) =
+    let reader = table_reader.NewTableReader(data, comparator(db))
+    db.persisted.add(PersistedTable(
+        level: level,
+        metadata: metadata,
+        path: path,
+        reader: reader
+    ))
+    sortPersistedTables(db.persisted)
+
+fn lookupPersistedAt(db: DB, key: core_types.Key, snapshotSeq: uint64): PersistedLookup =
+    if db == nil || db.persisted.len == 0:
+        return PersistedLookup(found: false, seq: uint64(0), value: option.none(str))
+    let comp = comparator(db)
+    var out = PersistedLookup(found: false, seq: uint64(0), value: option.none(str))
+    var i: int32 = 0
+    while i < db.persisted.len:
+        let item = db.persisted[i]
+        if ! keyInRange(comp, key, item.metadata):
+            i = i + 1
+            continue
+        let raw = table_reader.Get(item.reader, key)
+        if option.IsSome(raw):
+            let versions = decodePersistedVersions(option.Get(raw),
+                core_types.ToUint64(item.metadata.largestSeq))
+            let picked = chooseVersionAt(versions, snapshotSeq)
+            if picked.found && (! out.found || picked.seq > out.seq):
+                out = picked
+        i = i + 1
+    return out
+
+fn compactOutputLevel(db: DB): man_types.Level =
+    return maxInt32(1, db.cfg.flushLevel + 1)
+
+fn sortCompactionEntries(entries: var seq[CompactionEntry], comp: core_types.Comparator) =
+    if entries.len <= 1:
+        return
+    var i: int32 = 0
+    while i < entries.len:
+        var j: int32 = i + 1
+        while j < entries.len:
+            if comp(entries[j].key, entries[i].key) < 0:
+                let tmp = entries[i]
+                entries[i] = entries[j]
+                entries[j] = tmp
+            j = j + 1
+        i = i + 1
+
+fn collectCompactionEntries(db: DB): seq[CompactionEntry] =
+    if db == nil || db.persisted.len == 0:
+        return @[]
+    var grouped = tables.TableInit[seq[PersistedVersion]](128)
+    var i: int32 = 0
+    while i < db.persisted.len:
+        let item = db.persisted[i]
+        for kv in table_reader.Scan(item.reader):
+            let keyBytes = core_types.ToBytes(kv.key)
+            var versions: seq[PersistedVersion]
+            if tables.TableHas[seq[PersistedVersion]](grouped, keyBytes):
+                versions = tables.TableGet[seq[PersistedVersion]](grouped, keyBytes)
+            let decoded = decodePersistedVersions(kv.value,
+                core_types.ToUint64(item.metadata.largestSeq))
+            var j: int32 = 0
+            while j < decoded.len:
+                versions.add(decoded[j])
+                j = j + 1
+            tables.TablePut[seq[PersistedVersion]](grouped, keyBytes, versions)
+        i = i + 1
+    var out: seq[CompactionEntry]
+    var idx: int32 = 0
+    var key: str = ""
+    var versions: seq[PersistedVersion]
+    while tables.TableNext[seq[PersistedVersion]](grouped, &idx, &key, &versions):
+        let normalized = normalizeVersions(versions)
+        if normalized.len > 0:
+            out.add(CompactionEntry(key: core_types.ToKey(key), versions: normalized))
+    sortCompactionEntries(out, comparator(db))
+    return out
+
+fn compactPersisted(db: DB, force: bool = false): bool =
+    if ! hasPersistentStore(db):
+        return false
+    if db.persisted.len == 0:
+        return false
+    if ! force && db.persisted.len < CompactTriggerFileCount:
+        return false
+    if force && db.persisted.len <= 1:
+        return false
+    let entries = collectCompactionEntries(db)
+    if entries.len == 0:
+        return false
+    let fileNum = nextFileNumber(db)
+    let level = compactOutputLevel(db)
+    let path = sstablePath(db.cfg.sstableDir, level, fileNum)
+    var builder = table_builder.InitTableBuilder(
+        comparator(db),
+        db.cfg.tableBlockSize,
+        db.cfg.tableBloomBitsPerKey,
+        true
+    )
+    var hasSeq = false
+    var smallestSeq: uint64 = 0
+    var largestSeq: uint64 = 0
+    var i: int32 = 0
+    while i < entries.len:
+        let entry = entries[i]
+        table_builder.Add(builder, entry.key, encodePersistedVersions(entry.versions))
+        var j: int32 = 0
+        while j < entry.versions.len:
+            let ver = entry.versions[j]
+            if ! hasSeq:
+                hasSeq = true
+                smallestSeq = ver.seq
+                largestSeq = ver.seq
+            else:
+                if ver.seq < smallestSeq:
+                    smallestSeq = ver.seq
+                if ver.seq > largestSeq:
+                    largestSeq = ver.seq
+            j = j + 1
+        i = i + 1
+    if ! hasSeq:
+        return false
+    let artifacts = table_builder.Finish(builder)
+    writeFileBytes(path, artifacts.image.buffer)
+    let metadata = man_types.FileMetadata(
+        fileNum: fileNum,
+        sizeBytes: uint64(artifacts.image.buffer.len),
+        smallest: entries[0].key,
+        largest: entries[entries.len - 1].key,
+        smallestSeq: core_types.ToSequence(smallestSeq),
+        largestSeq: core_types.ToSequence(largestSeq)
+    )
+    if db.manifest != nil:
+        var edit = man_edit.InitVersionEdit()
+        man_edit.AddFile(edit, level, metadata)
+        var d: int32 = 0
+        while d < db.persisted.len:
+            let old = db.persisted[d]
+            man_edit.DeleteFile(edit, old.level, old.metadata.fileNum)
+            d = d + 1
+        man_edit.SetLastSequence(edit, core_types.ToSequence(db.nextSeq))
+        man_edit.SetNextFileNumber(edit, man_types.FileNumberToUint64(fileNum) + uint64(1))
+        man_set.ApplyEdit(db.manifest, edit)
+        man_set.Sync(db.manifest)
+    var r: int32 = 0
+    while r < db.persisted.len:
+        let oldPath = db.persisted[r].path
+        if oldPath != path && os.fileExists(oldPath):
+            os.removeFile(oldPath)
+        r = r + 1
+    db.persisted = @[]
+    appendPersistedTable(db, level, metadata, path, artifacts.image.buffer)
+    return true
+
+fn compactAllPersisted(db: DB) =
+    compactPersisted(db, true)
+
+fn applyFlushEdit(db: DB, metadata: man_types.FileMetadata) =
+    if db.manifest == nil:
+        return
+    var edit = man_edit.InitVersionEdit()
+    man_edit.AddFile(edit, db.cfg.flushLevel, metadata)
+    man_edit.SetLastSequence(edit, core_types.ToSequence(db.nextSeq))
+    man_edit.SetNextFileNumber(edit, man_types.FileNumberToUint64(metadata.fileNum) + uint64(1))
+    man_set.ApplyEdit(db.manifest, edit)
+    man_set.Sync(db.manifest)
+
+fn flushInternal(db: DB): bool =
+    if ! hasPersistentStore(db):
+        return false
+    let entries = collectFlushEntries(db)
+    if entries.len == 0:
+        memtable.Clear(db.mem)
+        return false
+    let fileNum = nextFileNumber(db)
+    let path = sstablePath(db.cfg.sstableDir, db.cfg.flushLevel, fileNum)
+    var builder = table_builder.InitTableBuilder(
+        comparator(db),
+        db.cfg.tableBlockSize,
+        db.cfg.tableBloomBitsPerKey,
+        true
+    )
+    var hasSeq = false
+    var smallestSeq: uint64 = 0
+    var largestSeq: uint64 = 0
+    var i: int32 = 0
+    while i < entries.len:
+        let item = entries[i]
+        let payload = encodePersistedVersions(item.versions)
+        table_builder.Add(builder, item.key, payload)
+        var j: int32 = 0
+        while j < item.versions.len:
+            let ver = item.versions[j]
+            if ! hasSeq:
+                hasSeq = true
+                smallestSeq = ver.seq
+                largestSeq = ver.seq
+            else:
+                if ver.seq < smallestSeq:
+                    smallestSeq = ver.seq
+                if ver.seq > largestSeq:
+                    largestSeq = ver.seq
+            j = j + 1
+        i = i + 1
+    if ! hasSeq:
+        memtable.Clear(db.mem)
+        memtable.MarkFlushCompleted(db.mem)
+        return false
+    let artifacts = table_builder.Finish(builder)
+    writeFileBytes(path, artifacts.image.buffer)
+    let metadata = man_types.FileMetadata(
+        fileNum: fileNum,
+        sizeBytes: uint64(artifacts.image.buffer.len),
+        smallest: entries[0].key,
+        largest: entries[entries.len - 1].key,
+        smallestSeq: core_types.ToSequence(smallestSeq),
+        largestSeq: core_types.ToSequence(largestSeq)
+    )
+    applyFlushEdit(db, metadata)
+    appendPersistedTable(db, db.cfg.flushLevel, metadata, path, artifacts.image.buffer)
+    memtable.Clear(db.mem)
+    memtable.MarkFlushCompleted(db.mem)
+    if db.cfg.resetWalOnFlush && db.wal != nil && db.ownsWal:
+        wal_writer.Reset(db.wal)
+        removeRotatedWalSegments(db.cfg.walPath, wal_writer.CurrentSegmentPath(db.wal))
+    compactPersisted(db, false)
+    return true
+
+fn bootstrapPersistence(db: DB) =
+    if db == nil:
+        return
+    if ! persistentRequested(db.cfg):
+        db.wal = db.cfg.walWriter
+        db.ownsWal = false
+        return
+    ensureDir(db.cfg.sstableDir)
+    let manifestDir = os.parentDir(db.cfg.manifestPath)
+    if strings.len(manifestDir) > 0:
+        ensureDir(manifestDir)
+    db.manifest = man_set.NewVersionSet(db.cfg.manifestPath,
+        baseVersion: nil,
+        executor: nil,
+        createIfMissing: db.cfg.createIfMissing)
+    loadTablesFromManifest(db)
+    replayWal(db)
+    if db.cfg.walWriter != nil:
+        db.wal = db.cfg.walWriter
+        db.ownsWal = false
+    elif strings.len(db.cfg.walPath) > 0:
+        db.wal = wal_writer.NewWalWriter(
+            db.cfg.walPath,
+            maxSegmentBytes: db.cfg.walMaxSegmentBytes
+        )
+        db.ownsWal = true
+    else:
+        db.wal = nil
+        db.ownsWal = false
+    db.cfg.walWriter = db.wal
+
+fn InitDB(cfg: batch_types.DBConfig): DB =
+    var normalized = cfg
+    batch_types.EnsureMemConfig(normalized)
+    if normalized.memConfig.comparator == nil:
+        normalized.memConfig.comparator = core_types.CompareBytewise
+    normalizePersistentConfig(normalized)
+    let mem = memtable.InitMemTable(normalized.memConfig)
+    var db: DB = new[DB]()
+    if db != nil:
+        db.cfg = normalized
+        db.mem = mem
+        db.nextSeq = 0
+        db.inflight = 0
+        db.closed = false
+        db.manifest = nil
+        db.wal = nil
+        db.ownsWal = false
+        db.persisted = @[]
+        bootstrapPersistence(db)
+    return db
+
+fn LatestSnapshot(db: DB): batch_types.Snapshot =
+    ensureOpen(db)
+    return batch_types.Snapshot(seq: core_types.ToSequence(db.nextSeq))
+
+fn Get(db: DB, key: core_types.Key, snapshot: batch_types.Snapshot): option.Option[str] =
+    ensureOpen(db)
+    var snapSeq = core_types.ToUint64(snapshot.seq)
+    if snapSeq == uint64(0):
+        snapSeq = db.nextSeq
+    let memHit = memtable.Lookup(db.mem, key, core_types.ToSequence(snapSeq))
+    if memHit.found:
+        return memHit.value
+    let persistedHit = lookupPersistedAt(db, key, snapSeq)
+    if persistedHit.found:
+        return persistedHit.value
+    return option.none(str)
+
+fn GetLatest(db: DB, key: core_types.Key): option.Option[str] =
+    return Get(db, key, LatestSnapshot(db))
+
+fn ApproxMemtableBytes(db: DB): int32 =
+    ensureOpen(db)
+    if db.mem == nil || db.mem.base == nil:
+        return 0
+    return db.mem.base.approxBytes
 
 fn NewBatch(db: DB, indexed: bool = false,
             snapshot: batch_types.Snapshot = batch_types.Snapshot(seq: core_types.ToSequence(0))): batch_module.BatchBase =
     ensureOpen(db)
     if indexed:
         let snap = if core_types.ToUint64(snapshot.seq) == 0: LatestSnapshot(db) else: snapshot
-        let resolver = fn (key: core_types.Key, snap: batch_types.Snapshot): option.Option[str] =
+        let resolver = fn(key: core_types.Key, snap: batch_types.Snapshot): option.Option[str] =
             return Get(db, key, snap)
         let idx = batch_module.NewIndexedBatch(db.cfg.memConfig, resolver, snap)
         return batch_module.Base(idx)
     return batch_module.NewBatch(db.cfg.memConfig)
 
+fn Flush(db: DB): bool =
+    ensureOpen(db)
+    return flushInternal(db)
+
 fn Close(db: DB) =
-    if db == nil:
+    if db == nil || db.closed:
         return
+    if hasPersistentStore(db) && db.mem != nil && db.mem.records.len > 0:
+        flushInternal(db)
+    compactAllPersisted(db)
+    if db.wal != nil:
+        wal_writer.Sync(db.wal)
+        if db.ownsWal:
+            wal_writer.Close(db.wal)
+    db.wal = nil
+    if db.manifest != nil:
+        man_set.Close(db.manifest)
+    db.manifest = nil
     db.closed = true
 
+fn Commit(db: DB, batch: batch_module.BatchBase): core_types.SequenceNumber =
+    return Commit(db, batch, batch_types.DefaultWriteOptions)
+
 fn Commit(db: DB, batch: batch_module.BatchBase,
-          opts: batch_types.WriteOptions = batch_types.DefaultWriteOptions): core_types.SequenceNumber =
+          opts: batch_types.WriteOptions): core_types.SequenceNumber =
     ensureOpen(db)
     if batch == nil:
         raise newException(batch_types.BatchError, "batch must not be nil")
@@ -109,9 +1025,9 @@ fn Commit(db: DB, batch: batch_module.BatchBase,
     var options = resolveOptions(db, opts)
     if options.timeoutMs < 0:
         raise newException(batch_types.BatchError, "timeoutMs must be >= 0")
-    if db.cfg.maxConcurrentCommits > 0 and db.inflight >= db.cfg.maxConcurrentCommits:
+    if db.cfg.maxConcurrentCommits > 0 && db.inflight >= db.cfg.maxConcurrentCommits:
         sendNudge(options.nudge, batch_types.BpMemStall, batch,
-            if db.mem != nil and db.mem.base != nil: db.mem.base.approxBytes else: 0)
+            if db.mem != nil && db.mem.base != nil: db.mem.base.approxBytes else: 0)
         raise newException(batch_types.BatchError, "maxConcurrentCommits limit reached")
     db.inflight = db.inflight + 1
     defer:
@@ -120,43 +1036,48 @@ fn Commit(db: DB, batch: batch_module.BatchBase,
     let opCount = batch_module.BatchLen(batch)
     if db.mem == nil:
         raise newException(batch_types.BatchError, "memtable is nil")
-    if memtable.NeedsFlush(db.mem) or memtable.ReadyForFlush(db.mem):
+    if memtable.NeedsFlush(db.mem) || memtable.ReadyForFlush(db.mem):
         sendNudge(options.nudge, batch_types.BpMemSoftLimit, batch, db.mem.base.approxBytes)
+    if db.cfg.autoFlush && hasPersistentStore(db):
+        if memtable.NeedsFlush(db.mem) || memtable.ReadyForFlush(db.mem):
+            flushInternal(db)
     if opCount > 0:
         let estimatedBytes = batch_module.EstimatedBytes(batch)
         let throttleDelay = memtable.AdmitWrite(db.mem, options.priority, estimatedBytes)
         if throttleDelay > 0:
             sendNudge(options.nudge, batch_types.BpMemStall, batch, db.mem.base.approxBytes)
-            if options.timeoutMs > 0 and throttleDelay > options.timeoutMs:
+            if options.timeoutMs > 0 && throttleDelay > options.timeoutMs:
                 raise newException(batch_types.BatchError,
                     "write admission timeout under memtable pressure")
     if opCount == 0:
         batch_module.MarkCommitted(batch)
         return core_types.ToSequence(db.nextSeq)
-    let prevSeq = db.nextSeq
-    let startSeqU = prevSeq + 1
+    let startSeqU = db.nextSeq + 1
     let startSeq = core_types.ToSequence(startSeqU)
     let entries = batch_module.ToApplyEntries(batch, startSeq)
     memtable.PrecheckApplyBatch(db.mem, entries)
-    let walWriter = db.cfg.walWriter
-    let walEnabled = walWriter != nil and (not options.disableWAL) and entries.len > 0
-    var walPayload = @[]
+    let walEnabled = db.wal != nil && (! options.disableWAL) && entries.len > 0
     if walEnabled:
-        walPayload = batch_module.ToWalPayload(batch, entries)
-    if walEnabled:
-        let walResult = wal_writer.Append(walWriter, walPayload,
+        let walPayload = batch_module.ToWalPayload(batch, entries)
+        let walResult = wal_writer.Append(db.wal, walPayload,
             wal_writer.WalAppendOptions(requireSync: options.sync))
-        if options.sync and walResult.syncHandle != nil:
+        if options.sync && walResult.syncHandle != nil:
             exec.Wait(walResult.syncHandle)
     memtable.ApplyBatch(db.mem, entries)
-    if memtable.NeedsFlush(db.mem) or memtable.ReadyForFlush(db.mem):
+    if memtable.NeedsFlush(db.mem) || memtable.ReadyForFlush(db.mem):
         sendNudge(options.nudge, batch_types.BpMemSoftLimit, batch, db.mem.base.approxBytes)
     let lastSeqU = startSeqU + uint64(entries.len) - 1
     let lastSeq = core_types.ToSequence(lastSeqU)
     db.nextSeq = lastSeqU
     batch_module.MarkCommitted(batch)
+    if db.cfg.autoFlush && hasPersistentStore(db):
+        if memtable.NeedsFlush(db.mem) || memtable.ReadyForFlush(db.mem):
+            flushInternal(db)
     return lastSeq
 
+fn Apply(db: DB, batch: batch_module.BatchBase): core_types.SequenceNumber =
+    return Commit(db, batch, batch_types.DefaultWriteOptions)
+
 fn Apply(db: DB, batch: batch_module.BatchBase,
-         opts: batch_types.WriteOptions = batch_types.DefaultWriteOptions): core_types.SequenceNumber =
+         opts: batch_types.WriteOptions): core_types.SequenceNumber =
     return Commit(db, batch, opts)

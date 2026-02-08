@@ -67,7 +67,7 @@ const
     ]
 
 fn headerIndex(typ: ChunkType): int32 =
-    return (int32)(typ)
+    return int32(typ)
 
 fn HeaderSize(typ: ChunkType): int32 =
     return chunkFormatTable[headerIndex(typ)].headerSize
@@ -103,7 +103,7 @@ fn ChunkTypeFor(pos: ChunkPosition, format: WireFormat): ChunkType =
     return ChunkInvalid
 
 fn IsReusable(format: WireFormat): bool =
-    return format == WireRecyclable or format == WireWalSync
+    return format == WireRecyclable || format == WireWalSync
 
 fn HasSyncOffset(format: WireFormat): bool =
     return format == WireWalSync

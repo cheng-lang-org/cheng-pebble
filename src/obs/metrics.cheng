@@ -1,10 +1,10 @@
 module pebble_obs_metrics
 
-import "./types.cheng" as obs_types
-import cheng / stdlib / bootstrap / tables as tables
-import cheng / stdlib / bootstrap / strings as strings
-import cheng / stdlib / bootstrap / std / strutils as strutils
-import cheng / stdlib / bootstrap / std / times as times
+import cheng/pebble/obs/types as obs_types
+import std/tables as tables
+import std/strings as strings
+import std/std/strutils as strutils
+import std/std/times as times
 
 type
     MetricDatum =
@@ -35,7 +35,7 @@ fn NewMetricsRegistry(buckets: seq[float64] = DefaultHistogramBuckets): MetricsR
 fn labelsKey(desc: obs_types.MetricDescriptor, labels: obs_types.LabelPairs): str =
     if desc.labelNames.len == 0:
         return ""
-    var parts: seq[str] = @[]
+    var parts: seq[str]
     var i: int32 = 0
     while i < desc.labelNames.len:
         let name = desc.labelNames[i]
@@ -65,10 +65,10 @@ fn ensureMetric(registry: MetricsRegistry, descriptor: obs_types.MetricDescripto
     return entry
 
 fn DeclareMetric(registry: MetricsRegistry, descriptor: obs_types.MetricDescriptor) =
-    discard ensureMetric(registry, descriptor)
+    ensureMetric(registry, descriptor)
 
 fn extractLabelNames(labels: seq[obs_types.LabelPair]): seq[str] =
-    var names: seq[str] = @[]
+    var names: seq[str]
     var i: int32 = 0
     while i < labels.len:
         names.add(labels[i][0])
@@ -145,13 +145,13 @@ fn ObserveHistogram(registry: MetricsRegistry, name: str, help: str = "",
             placed = true
             break
         i = i + 1
-    if not placed:
+    if ! placed:
         let last = datum.histogram.counts.len - 1
         datum.histogram.counts[last] = datum.histogram.counts[last] + 1
     tables.TablePut[MetricDatum](entry.data, key, datum)
 
 fn Snapshot(registry: MetricsRegistry): seq[obs_types.MetricSnapshot] =
-    var output: seq[obs_types.MetricSnapshot] = @[]
+    var output: seq[obs_types.MetricSnapshot]
     if registry == nil:
         return output
     var idx: int32 = 0
@@ -178,7 +178,7 @@ fn escapeLabel(value: str): str =
     return out
 
 fn int64ToStr(value: int64): str =
-    return strings.`$`(value)
+    return toString(value)
 
 fn floatToStr(value: float64): str =
     return strutils.formatFloat(value)
@@ -186,7 +186,7 @@ fn floatToStr(value: float64): str =
 fn renderLabels(desc: obs_types.MetricDescriptor, labels: obs_types.LabelPairs): str =
     if desc.labelNames.len == 0:
         return ""
-    var parts: seq[str] = @[]
+    var parts: seq[str]
     var i: int32 = 0
     while i < desc.labelNames.len:
         let name = desc.labelNames[i]
@@ -198,7 +198,7 @@ fn renderLabels(desc: obs_types.MetricDescriptor, labels: obs_types.LabelPairs):
     return "{" & strutils.join(parts, ",") & "}"
 
 fn RenderPrometheus(registry: MetricsRegistry): str =
-    var lines: seq[str] = @[]
+    var lines: seq[str]
     let snaps = Snapshot(registry)
     var i: int32 = 0
     while i < snaps.len:
@@ -244,7 +244,7 @@ fn RenderPrometheus(registry: MetricsRegistry): str =
     return strutils.join(lines, "\n")
 
 fn RenderStatsd(registry: MetricsRegistry, prefix: str = ""): seq[str] =
-    var out: seq[str] = @[]
+    var out: seq[str]
     let snaps = Snapshot(registry)
     var i: int32 = 0
     while i < snaps.len:

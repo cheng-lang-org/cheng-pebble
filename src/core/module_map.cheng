@@ -1,6 +1,6 @@
 module pebble_core_module_map
 
-import cheng / stdlib / bootstrap / tables as tables
+import std/tables as tables
 
 fn PackageMap(): tables.Table[str] =
     var mapping = tables.TableInit[str](32)

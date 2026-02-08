@@ -1,8 +1,8 @@
 module pebble_batch_types
 
-import "../core/types.cheng" as core_types
-import "../mem/types.cheng" as mem_types
-import "../wal/writer.cheng" as wal_writer
+import cheng/pebble/core/types as core_types
+import cheng/pebble/mem/types as mem_types
+import cheng/pebble/wal/writer as wal_writer
 
 type
     BatchError =
@@ -31,7 +31,7 @@ type
         memApproxBytes: int32
 
 type
-    BackpressureHandler = fn (info: BackpressureInfo)
+    BackpressureHandler = fn(info: BackpressureInfo)
 
 type
     WritePriority = mem_types.MemWritePriority
@@ -55,6 +55,18 @@ type
         defaultOptions: WriteOptions
         backpressure: BackpressureHandler
         walWriter: wal_writer.WalWriter
+        walPath: str
+        walMaxSegmentBytes: int64
+        manifestPath: str
+        sstableDir: str
+        autoFlush: bool
+        flushLevel: int32
+        tableBlockSize: int32
+        tableBloomBitsPerKey: int32
+        createIfMissing: bool
+        enableRecovery: bool
+        replayTailTolerance: bool
+        resetWalOnFlush: bool
 
 type
     BatchStats =
@@ -70,7 +82,7 @@ const
                      priority: mem_types.MemPriorityDefault)
 
 fn EnsureMemConfig(cfg: var DBConfig) =
-    if cfg.defaultOptions.nudge == nil and cfg.backpressure != nil:
+    if cfg.defaultOptions.nudge == nil && cfg.backpressure != nil:
         cfg.defaultOptions.nudge = cfg.backpressure
     if cfg.defaultOptions.priority == mem_types.MemPriorityDefault:
         cfg.defaultOptions.priority = mem_types.MemPriorityNormal

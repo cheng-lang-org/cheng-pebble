@@ -1,15 +1,15 @@
 module pebble_tooling_cli_core
 
-import cheng / stdlib / bootstrap / tables as tables
-import cheng / stdlib / bootstrap / strings as strings
-import cheng / stdlib / bootstrap / std / strutils as strutils
+import std/tables as tables
+import std/strings as strings
+import std/std/strutils as strutils
 
 type
     CliError =
         of CatchableError
 
 type
-    CliHandler = fn (ctx: CliContext, args: seq[str])
+    CliHandler = fn(ctx: CliContext, args: seq[str])
 
 type
     CliContext =
@@ -56,7 +56,7 @@ fn AddAlias(cmd: CliCommand, alias: str) =
     cmd.aliases.add(alias)
 
 fn AddSubcommand(parent: CliCommand, child: CliCommand) =
-    if parent == nil or child == nil:
+    if parent == nil || child == nil:
         return
     if tables.TableHas[CliCommand](parent.subcommands, child.name):
         raise newException(ValueError, "duplicate command registration: " & child.name)
@@ -79,14 +79,14 @@ fn FindSubcommand(parent: CliCommand, name: str): CliCommand =
     return nil
 
 fn renderPath(ctx: CliContext, cmd: CliCommand): str =
-    var parts: seq[str] = @[]
+    var parts: seq[str]
     if strings.len(ctx.programName) > 0:
         parts.add(ctx.programName)
     var i: int32 = 0
     while i < ctx.commandPath.len:
         parts.add(ctx.commandPath[i])
         i = i + 1
-    if cmd != nil and strings.len(cmd.name) > 0:
+    if cmd != nil && strings.len(cmd.name) > 0:
         parts.add(cmd.name)
     return strutils.join(parts, " ")
 
@@ -95,7 +95,7 @@ fn RenderUsage(cmd: CliCommand, ctx: CliContext) =
         return
     let path = renderPath(ctx, cmd)
     echo("Usage:")
-    if cmd.hasHandler or cmd.subcommands.len == 0:
+    if cmd.hasHandler || cmd.subcommands.len == 0:
         echo("  " & path & " [flags]")
     if cmd.subcommands.len > 0:
         echo("  " & path & " <subcommand> [flags]")
@@ -127,7 +127,7 @@ fn Dispatch(cmd: CliCommand,
             RenderUsage(cmd, ctx)
         return
     let first = args[0]
-    if first == "-h" or first == "--help" or first == "help":
+    if first == "-h" || first == "--help" || first == "help":
         RenderUsage(cmd, ctx)
         return
     let sub = FindSubcommand(cmd, first)
@@ -135,7 +135,7 @@ fn Dispatch(cmd: CliCommand,
         var nextCtx = ctx
         nextCtx.commandPath = ctx.commandPath
         nextCtx.commandPath.add(cmd.name)
-        var tail: seq[str] = @[]
+        var tail: seq[str]
         var i: int32 = 1
         while i < args.len:
             tail.add(args[i])

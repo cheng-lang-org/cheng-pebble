@@ -1,14 +1,14 @@
 module pebble_tooling_sstable_commands
 
-import "../sstable/types.cheng" as sstable_types
-import "../sstable/table_reader.cheng" as table_reader
-import "../core/types.cheng" as core_types
-import "./cli_core.cheng" as cli_core
-import cheng / stdlib / bootstrap / bytes as bytes
-import cheng / stdlib / bootstrap / core / option as option
-import cheng / stdlib / bootstrap / strings as strings
-import cheng / stdlib / bootstrap / std / strutils as strutils
-import cheng / stdlib / bootstrap / std / os as os
+import cheng/pebble/sstable/types as sstable_types
+import cheng/pebble/sstable/table_reader as table_reader
+import cheng/pebble/core/types as core_types
+import cheng/pebble/tooling/cli_core as cli_core
+import std/bytes as bytes
+import std/option as option
+import std/strings as strings
+import std/std/strutils as strutils
+import std/os as os
 
 
 type
@@ -29,8 +29,8 @@ fn StrToHex(text: str): str =
     let n: int32 = strings.len(text)
     while i < n:
         let v: int32 = ord(text[i])
-        let hi = (v shr 4) and 0xF
-        let lo = v and 0xF
+        let hi = (v >> 4) & 0xF
+        let lo = v & 0xF
         out = out + strings.charToStr(hexDigit(hi)) + strings.charToStr(hexDigit(lo))
         i = i + 1
     return out
@@ -82,7 +82,7 @@ fn collectDigest(path: str): TableDigest =
 
 fn renderDigest(digest: TableDigest) =
     echo("File: " & digest.path)
-    echo("  Size: " & strings.`$`(digest.size) & " bytes")
+    echo("  Size: " & toString(digest.size) & " bytes")
     var counts: array[4, int32]
     var bytesByKind: array[4, int32]
     var i: int32 = 0
@@ -96,30 +96,30 @@ fn renderDigest(digest: TableDigest) =
     while k < 4:
         let kind = sstable_types.BlockKind(k)
         let label = kindLabel(kind)
-        echo("  " & label & " blocks: " & strings.`$`(counts[k]) &
-            " total bytes: " & strings.`$`(bytesByKind[k]))
+        echo("  " & label & " blocks: " & toString(counts[k]) &
+            " total bytes: " & toString(bytesByKind[k]))
         k = k + 1
     let props = digest.props
-    echo("  Entries: " & strings.`$`(props.numEntries))
-    echo("  Raw key bytes: " & strings.`$`(props.rawKeySize))
-    echo("  Raw value bytes: " & strings.`$`(props.rawValueSize))
+    echo("  Entries: " & toString(props.numEntries))
+    echo("  Raw key bytes: " & toString(props.rawKeySize))
+    echo("  Raw value bytes: " & toString(props.rawValueSize))
     if option.IsSome(props.smallestKey):
         echo("  Smallest key: " & core_types.ToBytes(option.Get(props.smallestKey)))
     if option.IsSome(props.largestKey):
         echo("  Largest key: " & core_types.ToBytes(option.Get(props.largestKey)))
     if option.IsSome(props.bloomBitsPerKey):
-        echo("  Bloom bits/key: " & strings.`$`(option.Get(props.bloomBitsPerKey)))
+        echo("  Bloom bits/key: " & toString(option.Get(props.bloomBitsPerKey)))
 
 fn handleLs(ctx: cli_core.CliContext, args: seq[str]) =
     ctx
-    if args.len == 0 or (args.len > 0 and (args[0] == "-h" or args[0] == "--help")):
+    if args.len == 0 || (args.len > 0 && (args[0] == "-h" || args[0] == "--help")):
         echo("Usage:")
         echo("  " & "sstable ls <sstable>...")
         return
     var i: int32 = 0
     while i < args.len:
         let path = args[i]
-        if not os.fileExists(path):
+        if ! os.fileExists(path):
             cli_core.RaiseCliError("file does not exist: " & path)
         let digest = collectDigest(path)
         renderDigest(digest)
@@ -127,21 +127,21 @@ fn handleLs(ctx: cli_core.CliContext, args: seq[str]) =
 
 fn handleDump(ctx: cli_core.CliContext, args: seq[str]) =
     ctx
-    var files: seq[str] = @[]
+    var files: seq[str]
     var limit: int32 = -1
     var hexMode: bool = false
     var i: int32 = 0
     while i < args.len:
         let arg = args[i]
-        if strutils.startsWith(arg, "--limit=") or strutils.startsWith(arg, "--count="):
+        if strutils.startsWith(arg, "--limit=") || strutils.startsWith(arg, "--count="):
             let parts = strutils.split(arg, '=')
             if parts.len > 1:
                 limit = int32(strutils.parseInt(parts[1]))
-        elif arg == "--limit" or arg == "--count":
+        elif arg == "--limit" || arg == "--count":
             cli_core.RaiseCliError("use --limit=<N> or --count=<N>")
         elif arg == "--hex":
             hexMode = true
-        elif arg == "-h" or arg == "--help":
+        elif arg == "-h" || arg == "--help":
             echo("Usage:")
             echo("  sstable dump [--limit=N|--count=N] [--hex] <sstable>...")
             return
@@ -153,7 +153,7 @@ fn handleDump(ctx: cli_core.CliContext, args: seq[str]) =
     var f: int32 = 0
     while f < files.len:
         let path = files[f]
-        if not os.fileExists(path):
+        if ! os.fileExists(path):
             cli_core.RaiseCliError("file does not exist: " & path)
         let reader = readTable(path)
         echo("File: " & path)
@@ -163,9 +163,9 @@ fn handleDump(ctx: cli_core.CliContext, args: seq[str]) =
             let valueStr = formatValue(kv.value, hexMode)
             echo("  " & keyStr & " : " & valueStr)
             count = count + 1
-            if limit >= 0 and count >= limit:
+            if limit >= 0 && count >= limit:
                 break
-        if limit >= 0 and count >= limit:
+        if limit >= 0 && count >= limit:
             echo("  ...(truncated)")
         f = f + 1
 

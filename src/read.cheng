@@ -1,10 +1,10 @@
 module pebble_read
 
-import "./read/types.cheng" as read_types
-import "./read/iterators.cheng" as read_iterators
-import "./read/trace.cheng" as read_trace
-import "./core/types.cheng" as core_types
-import cheng / stdlib / bootstrap / core / option as option
+import cheng/pebble/read/types as read_types
+import cheng/pebble/read/iterators as read_iterators
+import cheng/pebble/read/trace as read_trace
+import cheng/pebble/core/types as core_types
+import std/option as option
 
 
 type

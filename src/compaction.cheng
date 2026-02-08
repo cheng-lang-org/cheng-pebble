@@ -1,12 +1,12 @@
 module pebble_compaction
 
-import "./compaction/types.cheng" as comp_types
-import "./compaction/planner.cheng" as comp_planner
-import "./compaction/scheduler.cheng" as comp_scheduler
-import "./compaction/executor.cheng" as comp_executor
-import "./core/types.cheng" as core_types
-import "./manifest/version.cheng" as man_version
-import cheng / stdlib / bootstrap / core / option as option
+import cheng/pebble/compaction/types as comp_types
+import cheng/pebble/compaction/planner as comp_planner
+import cheng/pebble/compaction/scheduler as comp_scheduler
+import cheng/pebble/compaction/executor as comp_executor
+import cheng/pebble/core/types as core_types
+import cheng/pebble/manifest/version as man_version
+import std/option as option
 
 
 type

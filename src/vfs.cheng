@@ -1,12 +1,12 @@
 module pebble_vfs
 
-import "./vfs/types.cheng" as vtypes
-import "./vfs/faults.cheng" as vfs_faults
-import "./vfs/posix_fs.cheng" as vfs_posix
-import "./vfs/buffered_fs.cheng" as vfs_buffered
-import "./vfs/cache_fs.cheng" as vfs_cache
-import "./vfs/prefetch_rate.cheng" as vfs_prefetch
-import "./vfs/mount_fs.cheng" as vfs_mount
+import cheng/pebble/vfs/types as vtypes
+import cheng/pebble/vfs/faults as vfs_faults
+import cheng/pebble/vfs/posix_fs as vfs_posix
+import cheng/pebble/vfs/buffered_fs as vfs_buffered
+import cheng/pebble/vfs/cache_fs as vfs_cache
+import cheng/pebble/vfs/prefetch_rate as vfs_prefetch
+import cheng/pebble/vfs/mount_fs as vfs_mount
 
 type
     MountPoint = vfs_mount.MountPoint

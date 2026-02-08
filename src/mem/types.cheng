@@ -1,9 +1,9 @@
 module pebble_mem_types
 
-import "../core/types.cheng" as core_types
-import "../runtime/executor.cheng" as exec
-import "../runtime/resource_manager.cheng" as resource
-import cheng / stdlib / bootstrap / core / option as option
+import cheng/pebble/core/types as core_types
+import cheng/pebble/runtime/executor as exec
+import cheng/pebble/runtime/resource_manager as resource
+import std/option as option
 
 const
     entryOverhead = 16
@@ -13,7 +13,7 @@ type
         of CatchableError
 
 type
-    MergeOperator = fn (key: core_types.Key,
+    MergeOperator = fn(key: core_types.Key,
                         existing: option.Option[str],
                         operands: seq[str]): option.Option[str]
 
@@ -62,7 +62,7 @@ type
         frozen: bool
 
 type
-    FlushTrigger = fn (target: Flushable)
+    FlushTrigger = fn(target: Flushable)
 
 type
     MemTableConfig =
@@ -117,7 +117,7 @@ fn HasMerge(cfg: MemTableConfig): bool =
     return cfg.mergeOperator != nil
 
 fn Normalize(cfg: var ThrottleConfig) =
-    if cfg.priorityScaleLow == 0.0 and cfg.priorityScaleNormal == 0.0 and
+    if cfg.priorityScaleLow == 0.0 && cfg.priorityScaleNormal == 0.0 &&
        cfg.priorityScaleHigh == 0.0:
         cfg.priorityScaleLow = 1.0
         cfg.priorityScaleNormal = 1.0
@@ -128,7 +128,7 @@ fn Normalize(cfg: var ThrottleConfig) =
         cfg.maxDelayMs = cfg.baseDelayMs
 
 fn ThrottleEnabled(cfg: ThrottleConfig): bool =
-    return cfg.enabled and (cfg.stallLimitBytes > 0 or cfg.releaseTargetBytes > 0)
+    return cfg.enabled && (cfg.stallLimitBytes > 0 || cfg.releaseTargetBytes > 0)
 
 fn ResourceKindToString(kind: resource.ResourceKind): str =
     if kind == resource.ResMemoryBytes:
@@ -142,13 +142,13 @@ fn ResourceKindToString(kind: resource.ResourceKind): str =
     return "unknown"
 
 fn ResourceKindFromString(value: str): resource.ResourceKind =
-    if value == "resMemoryBytes" or value == "ResMemoryBytes":
+    if value == "resMemoryBytes" || value == "ResMemoryBytes":
         return resource.ResMemoryBytes
-    if value == "resDiskBytes" or value == "ResDiskBytes":
+    if value == "resDiskBytes" || value == "ResDiskBytes":
         return resource.ResDiskBytes
-    if value == "resFileHandles" or value == "ResFileHandles":
+    if value == "resFileHandles" || value == "ResFileHandles":
         return resource.ResFileHandles
-    if value == "resCompactionTokens" or value == "ResCompactionTokens":
+    if value == "resCompactionTokens" || value == "ResCompactionTokens":
         return resource.ResCompactionTokens
     raise newException(ValueError, "unknown resource kind: " & value)
 
@@ -162,10 +162,10 @@ fn MemValueKindToString(kind: MemValueKind): str =
     return "unknown"
 
 fn MemValueKindFromString(value: str): MemValueKind =
-    if value == "set" or value == "memValueSet" or value == "MemValueSet":
+    if value == "set" || value == "memValueSet" || value == "MemValueSet":
         return MemValueSet
-    if value == "delete" or value == "del" or value == "memValueDelete" or value == "MemValueDelete":
+    if value == "delete" || value == "del" || value == "memValueDelete" || value == "MemValueDelete":
         return MemValueDelete
-    if value == "merge" or value == "memValueMerge" or value == "MemValueMerge":
+    if value == "merge" || value == "memValueMerge" || value == "MemValueMerge":
         return MemValueMerge
     raise newException(ValueError, "unknown mem value kind: " & value)

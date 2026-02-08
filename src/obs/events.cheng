@@ -1,8 +1,8 @@
 module pebble_obs_events
 
-import "./types.cheng" as obs_types
-import cheng / stdlib / bootstrap / seqs as seqs
-import cheng / stdlib / bootstrap / std / times as times
+import cheng/pebble/obs/types as obs_types
+import std/seqs as seqs
+import std/std/times as times
 
 type
     EventBus = ref
@@ -19,7 +19,7 @@ fn NewEventBus(maxBuffer: int32 = 256): EventBus =
     return bus
 
 fn RegisterListener(bus: EventBus, listener: obs_types.EventListener) =
-    if bus == nil or listener == nil:
+    if bus == nil || listener == nil:
         return
     bus.listeners.add(listener)
 
@@ -30,7 +30,7 @@ fn Publish(bus: EventBus, event: obs_types.ObsEvent) =
     if enriched.timestamp.unix == 0:
         enriched.timestamp = times.now()
     bus.buffer.add(enriched)
-    if bus.maxBuffer > 0 and bus.buffer.len > bus.maxBuffer:
+    if bus.maxBuffer > 0 && bus.buffer.len > bus.maxBuffer:
         seqs.delete[obs_types.ObsEvent](&bus.buffer, 0)
     var i: int32 = 0
     while i < bus.listeners.len:
@@ -40,12 +40,12 @@ fn Publish(bus: EventBus, event: obs_types.ObsEvent) =
         i = i + 1
 
 fn Recent(bus: EventBus, limit: int32 = 20): seq[obs_types.ObsEvent] =
-    if bus == nil or bus.buffer.len == 0:
+    if bus == nil || bus.buffer.len == 0:
         return @[]
     var start: int32 = 0
-    if bus.buffer.len > limit and limit > 0:
+    if bus.buffer.len > limit && limit > 0:
         start = bus.buffer.len - limit
-    var out: seq[obs_types.ObsEvent] = @[]
+    var out: seq[obs_types.ObsEvent]
     var i: int32 = start
     while i < bus.buffer.len:
         out.add(bus.buffer[i])

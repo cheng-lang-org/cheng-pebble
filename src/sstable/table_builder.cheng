@@ -1,13 +1,13 @@
 module pebble_sstable_table_builder
 
-import "../core/types.cheng" as core_types
-import "../sstable/types.cheng" as sstable_types
-import "../sstable/encoding.cheng" as enc
-import "../sstable/block.cheng" as block
-import "../sstable/filter.cheng" as filter
-import cheng / stdlib / bootstrap / core / option as option
-import cheng / stdlib / bootstrap / system as sys
-import cheng / stdlib / bootstrap / strings as strings
+import cheng/pebble/core/types as core_types
+import cheng/pebble/sstable/types as sstable_types
+import cheng/pebble/sstable/encoding as enc
+import cheng/pebble/sstable/block as block
+import cheng/pebble/sstable/filter as filter
+import std/option as option
+import std/system as sys
+import std/strings as strings
 
 const
     FooterMagic = "SSTN"
@@ -47,9 +47,9 @@ fn appendSeq(dst: var seq[uint8], src: seq[uint8]) =
 
 fn appendUint32LE(buf: var seq[uint8], value: uint32) =
     buf.add(uint8(value & uint32(0xFF)))
-    buf.add(uint8((value shr 8) & uint32(0xFF)))
-    buf.add(uint8((value shr 16) & uint32(0xFF)))
-    buf.add(uint8((value shr 24) & uint32(0xFF)))
+    buf.add(uint8((value >> 8) & uint32(0xFF)))
+    buf.add(uint8((value >> 16) & uint32(0xFF)))
+    buf.add(uint8((value >> 24) & uint32(0xFF)))
 
 fn InitTableBuilder(comparator: core_types.Comparator = core_types.CompareBytewise,
                     blockSize: int32 = DefaultBlockSize,
@@ -80,12 +80,12 @@ fn updateProperties(builder: var TableBuilder, key: core_types.Key, value: str) 
     builder.properties.numEntries = builder.properties.numEntries + 1
     builder.properties.rawKeySize = builder.properties.rawKeySize + strings.len(core_types.ToBytes(key))
     builder.properties.rawValueSize = builder.properties.rawValueSize + strings.len(value)
-    if not option.IsSome(builder.properties.smallestKey):
+    if ! option.IsSome(builder.properties.smallestKey):
         builder.properties.smallestKey = option.some(key)
     builder.properties.largestKey = option.some(key)
 
 fn encodeIndex(entries: seq[sstable_types.IndexEntry]): seq[uint8] =
-    var buffer: seq[uint8] = @[]
+    var buffer: seq[uint8]
     enc.AppendVarint(buffer, uint64(entries.len))
     var i: int32 = 0
     while i < entries.len:
@@ -97,10 +97,10 @@ fn encodeIndex(entries: seq[sstable_types.IndexEntry]): seq[uint8] =
     return buffer
 
 fn encodeProperties(props: sstable_types.TableProperties): seq[uint8] =
-    var records: seq[PropertyRecord] = @[]
-    records.add(PropertyRecord(key: "num_entries", value: strings.`$`(props.numEntries)))
-    records.add(PropertyRecord(key: "raw_key_size", value: strings.`$`(props.rawKeySize)))
-    records.add(PropertyRecord(key: "raw_value_size", value: strings.`$`(props.rawValueSize)))
+    var records: seq[PropertyRecord]
+    records.add(PropertyRecord(key: "num_entries", value: toString(props.numEntries)))
+    records.add(PropertyRecord(key: "raw_key_size", value: toString(props.rawKeySize)))
+    records.add(PropertyRecord(key: "raw_value_size", value: toString(props.rawValueSize)))
     if option.IsSome(props.smallestKey):
         records.add(PropertyRecord(key: "smallest_key",
             value: core_types.ToBytes(option.Get(props.smallestKey))))
@@ -109,8 +109,8 @@ fn encodeProperties(props: sstable_types.TableProperties): seq[uint8] =
             value: core_types.ToBytes(option.Get(props.largestKey))))
     if option.IsSome(props.bloomBitsPerKey):
         records.add(PropertyRecord(key: "bloom_bits_per_key",
-            value: strings.`$`(option.Get(props.bloomBitsPerKey))))
-    var buffer: seq[uint8] = @[]
+            value: toString(option.Get(props.bloomBitsPerKey))))
+    var buffer: seq[uint8]
     enc.AppendVarint(buffer, uint64(records.len))
     var i: int32 = 0
     while i < records.len:
@@ -123,7 +123,7 @@ fn encodeProperties(props: sstable_types.TableProperties): seq[uint8] =
 fn encodeFooter(indexHandle: sstable_types.BlockHandle,
                 filterHandle: option.Option[sstable_types.BlockHandle],
                 metaHandle: sstable_types.BlockHandle): seq[uint8] =
-    var payload: seq[uint8] = @[]
+    var payload: seq[uint8]
     enc.AppendVarint(payload, uint64(indexHandle.offset))
     enc.AppendVarint(payload, uint64(indexHandle.length))
     if option.IsSome(filterHandle):
@@ -135,7 +135,7 @@ fn encodeFooter(indexHandle: sstable_types.BlockHandle,
         enc.AppendVarint(payload, 0)
     enc.AppendVarint(payload, uint64(metaHandle.offset))
     enc.AppendVarint(payload, uint64(metaHandle.length))
-    var buffer: seq[uint8] = @[]
+    var buffer: seq[uint8]
     appendSeq(buffer, payload)
     appendUint32LE(buffer, uint32(payload.len))
     enc.AppendStrBytes(buffer, FooterMagic)
@@ -146,12 +146,12 @@ fn shortestSeparator(a: core_types.Key, b: core_types.Key): core_types.Key =
     let right = core_types.ToBytes(b)
     let limit = minInt32(strings.len(left), strings.len(right))
     var idx: int32 = 0
-    while idx < limit and strings.charAt(left, idx) == strings.charAt(right, idx):
+    while idx < limit && strings.charAt(left, idx) == strings.charAt(right, idx):
         idx = idx + 1
     if idx < limit:
         let current = uint8(sys.ord(strings.charAt(left, idx)))
         let target = uint8(sys.ord(strings.charAt(right, idx)))
-        if current < uint8(0xFF) and current + uint8(1) < target:
+        if current < uint8(0xFF) && current + uint8(1) < target:
             let prefix = if idx == 0: "" else: left[0..idx - 1]
             let nextChar = strings.charToStr(sys.chr(int32(current + uint8(1))))
             return core_types.ToKey(prefix & nextChar)
@@ -175,7 +175,7 @@ fn shortestSuccessor(a: core_types.Key): core_types.Key =
     return core_types.ToKey(bytes & strings.charToStr(sys.chr(0)))
 
 fn emitPendingIndex(builder: var TableBuilder, nextKey: core_types.Key) =
-    if not option.IsSome(builder.pendingHandle) or not option.IsSome(builder.pendingLastKey):
+    if ! option.IsSome(builder.pendingHandle) || ! option.IsSome(builder.pendingLastKey):
         return
     let separator = shortestSeparator(option.Get(builder.pendingLastKey), nextKey)
     builder.indexEntries.add(
@@ -188,7 +188,7 @@ fn emitPendingIndex(builder: var TableBuilder, nextKey: core_types.Key) =
     builder.pendingLastKey = option.none(core_types.Key)
 
 fn emitFinalPendingIndex(builder: var TableBuilder) =
-    if not option.IsSome(builder.pendingHandle) or not option.IsSome(builder.pendingLastKey):
+    if ! option.IsSome(builder.pendingHandle) || ! option.IsSome(builder.pendingLastKey):
         return
     let successor = shortestSuccessor(option.Get(builder.pendingLastKey))
     builder.indexEntries.add(
@@ -235,7 +235,7 @@ fn Finish(builder: var TableBuilder): sstable_types.TableBuildArtifacts =
     appendSeq(builder.buffer, indexBlock)
     let indexHandle = sstable_types.InitBlockHandle(indexOffset, indexBlock.len)
     builder.sections.add(sstable_types.TableSection(kind: sstable_types.BlockIndex, handle: indexHandle))
-    var bloomData: seq[uint8] = @[]
+    var bloomData: seq[uint8]
     var bloomFilter = option.none(sstable_types.BloomFilter)
     if builder.filterEnabled:
         let bloomResult = filter.Finish(builder.filterBuilder)

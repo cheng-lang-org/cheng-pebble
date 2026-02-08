@@ -1,7 +1,7 @@
 module pebble_read_types
 
-import "../core/types.cheng" as core_types
-import cheng / stdlib / bootstrap / core / option as option
+import cheng/pebble/core/types as core_types
+import std/option as option
 
 type
     ReadError =

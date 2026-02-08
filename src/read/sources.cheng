@@ -1,14 +1,14 @@
 module pebble_read_sources
 
-import "../core/types.cheng" as core_types
-import "../mem/types.cheng" as mem_types
-import "../mem/memtable.cheng" as memtable
-import "../runtime/resource_manager.cheng" as resource
-import "../read/types.cheng" as read_types
-import "../sstable/table_reader.cheng" as sstable_reader
-import "../batch/batch.cheng" as batch_module
-import cheng / stdlib / bootstrap / core / option as option
-import cheng / stdlib / bootstrap / tables as tables
+import cheng/pebble/core/types as core_types
+import cheng/pebble/mem/types as mem_types
+import cheng/pebble/mem/memtable as memtable
+import cheng/pebble/runtime/resource_manager as resource
+import cheng/pebble/read/types as read_types
+import cheng/pebble/sstable/table_reader as sstable_reader
+import cheng/pebble/batch/batch as batch_module
+import std/option as option
+import std/tables as tables
 
 const
     DefaultBatchPriority = -10
@@ -52,13 +52,13 @@ fn collectMemEntries(mt: mem_types.MemTable,
         let rec = mt.records[i]
         if core_types.ToUint64(rec.seq) <= snapshotValue:
             let keyBytes = core_types.ToBytes(rec.key)
-            var list: seq[mem_types.MemRecord] = @[]
+            var list: seq[mem_types.MemRecord]
             if tables.TableHas[seq[mem_types.MemRecord]](grouped, keyBytes):
                 list = tables.TableGet[seq[mem_types.MemRecord]](grouped, keyBytes)
             list.add(rec)
             tables.TablePut[seq[mem_types.MemRecord]](grouped, keyBytes, list)
         i = i + 1
-    var out: seq[read_types.ReadSourceEntry] = @[]
+    var out: seq[read_types.ReadSourceEntry]
     var idx: int32 = 0
     var key: str = ""
     var records: seq[mem_types.MemRecord]
@@ -68,7 +68,7 @@ fn collectMemEntries(mt: mem_types.MemTable,
         sortRecordsDesc(records)
         let currentKey = core_types.ToKey(key)
         var currentBase = option.none(str)
-        var operands: seq[str] = @[]
+        var operands: seq[str]
         var hasVisible: bool = false
         var doneForKey: bool = false
         var j: int32 = 0
@@ -86,11 +86,11 @@ fn collectMemEntries(mt: mem_types.MemTable,
             else:
                 operands.add(rec.value)
             j = j + 1
-        if not hasVisible:
+        if ! hasVisible:
             continue
         var finalValue: option.Option[str]
         if operands.len > 0:
-            if not mem_types.HasMerge(mt.cfg):
+            if ! mem_types.HasMerge(mt.cfg):
                 raise newException(read_types.ReadError,
                     "memtable merge operand without merge operator")
             reverseStrings(operands)
@@ -110,7 +110,7 @@ fn BatchReadSource(batch: batch_module.BatchBase,
                    comparator: core_types.Comparator,
                    mergeOp: mem_types.MergeOperator = nil,
                    priority: int32 = DefaultBatchPriority): read_types.ReadSource =
-    if batch == nil or batch.ops.len == 0:
+    if batch == nil || batch.ops.len == 0:
         return read_types.NewReadSource(@[], priority, read_types.ReadSourceBatch)
     var effectiveComp = comparator
     if effectiveComp == nil:
@@ -122,7 +122,7 @@ fn BatchReadSource(batch: batch_module.BatchBase,
             hasMerge = true
             break
         i = i + 1
-    if hasMerge and mergeOp == nil:
+    if hasMerge && mergeOp == nil:
         raise newException(read_types.ReadError,
             "batch contains merge operations; merge operator required")
     var cfg: mem_types.MemTableConfig
@@ -143,7 +143,7 @@ fn BatchReadSource(batch: batch_module.BatchBase,
 
 fn SstReadSource(reader: sstable_reader.TableReader,
                  priority: int32 = DefaultSSTPriority): read_types.ReadSource =
-    var entries: seq[read_types.ReadSourceEntry] = @[]
+    var entries: seq[read_types.ReadSourceEntry]
     if reader != nil:
         for entry in sstable_reader.Scan(reader):
             entries.add(read_types.ReadSourceEntry(

@@ -1,8 +1,8 @@
 module pebble_qa_dsl
 
-import cheng / stdlib / bootstrap / core / option as option
-import cheng / stdlib / bootstrap / std / strutils as strutils
-import cheng / stdlib / bootstrap / strings as strings
+import std/option as option
+import std/std/strutils as strutils
+import std/strings as strings
 
 type
     QAActionKind = enum
@@ -18,7 +18,7 @@ type
 
 fn parseActionLine(line: str): QAAction =
     let trimmed = strutils.strip(line)
-    if strings.len(trimmed) == 0 or trimmed[0] == '#':
+    if strings.len(trimmed) == 0 || trimmed[0] == '#':
         return QAAction(kind: QaPut, key: "", value: option.none(str))
     let parts = strutils.splitWhitespace(trimmed)
     if parts.len == 0:
@@ -36,7 +36,7 @@ fn parseActionLine(line: str): QAAction =
             value = value & parts[i]
             i = i + 1
         return QAAction(kind: QaPut, key: key, value: option.some(value))
-    if opcode == "delete" or opcode == "del":
+    if opcode == "delete" || opcode == "del":
         if parts.len < 2:
             raise newException(ValueError, "delete requires key")
         return QAAction(kind: QaDelete, key: parts[1], value: option.none(str))
@@ -55,12 +55,12 @@ fn parseActionLine(line: str): QAAction =
     raise newException(ValueError, "unknown QA action: " & opcode)
 
 fn ParseScenario(text: str): seq[QAAction] =
-    var actions: seq[QAAction] = @[]
+    var actions: seq[QAAction]
     let lines = strutils.split(text, '\n')
     var i: int32 = 0
     while i < lines.len:
         let trimmed = strutils.strip(lines[i])
-        if strings.len(trimmed) == 0 or trimmed[0] == '#':
+        if strings.len(trimmed) == 0 || trimmed[0] == '#':
             i = i + 1
             continue
         let action = parseActionLine(trimmed)

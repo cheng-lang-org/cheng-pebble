@@ -1,6 +1,6 @@
 module pebble_qa_differ
 
-import "../batch/interop.cheng" as batch_interop
+import cheng/pebble/batch/interop as batch_interop
 
 type
     BatchState = batch_interop.BatchState

@@ -1,10 +1,10 @@
 module pebble_sstable_filter
 
-import "../core/types.cheng" as core_types
-import "../sstable/types.cheng" as sstable_types
-import "../sstable/encoding.cheng" as enc
-import cheng / stdlib / bootstrap / system as sys
-import cheng / stdlib / bootstrap / strings as strings
+import cheng/pebble/core/types as core_types
+import cheng/pebble/sstable/types as sstable_types
+import cheng/pebble/sstable/encoding as enc
+import std/system as sys
+import std/strings as strings
 
 const
     MinBloomBits = 64
@@ -37,11 +37,11 @@ fn hashMix(key: str, salt: uint32): uint32 =
     let n: int32 = strings.len(key)
     while i < n:
         let ch = strings.charAt(key, i)
-        h = (h xor uint32(sys.ord(ch))) * uint32(16777619)
+        h = (h ^ uint32(sys.ord(ch))) * uint32(16777619)
         i = i + 1
-    h = h xor salt
+    h = h ^ salt
     h = h * uint32(16777619)
-    return h xor (h shr 16)
+    return h ^ (h >> 16)
 
 fn InitBloomFilterBuilder(bitsPerKey: int32): BloomFilterBuilder =
     if bitsPerKey <= 0:
@@ -58,7 +58,7 @@ fn buildFilter(keys: seq[str], bitsPerKey: int32): sstable_types.BloomFilter =
     var numBits: int32 = keys.len * bitsPerKey
     if numBits < MinBloomBits:
         numBits = MinBloomBits
-    let numBytes = (numBits + 7) shr 3
+    let numBytes = (numBits + 7) >> 3
     var bits = newSeq[uint8](numBytes)
     const salt1 = uint32(0x47c6a7e5)
     const salt2 = uint32(0x9e3779b1)
@@ -70,9 +70,9 @@ fn buildFilter(keys: seq[str], bitsPerKey: int32): sstable_types.BloomFilter =
         var n: int32 = 0
         while n < numProbes:
             let combined = h1 + uint32(n) * h2
-            let bitPos = int32(combined mod uint32(numBits))
-            let byteIdx = bitPos shr 3
-            let mask = uint8(1 shl (bitPos & 7))
+            let bitPos = int32(combined % uint32(numBits))
+            let byteIdx = bitPos >> 3
+            let mask = uint8(1 << (bitPos & 7))
             bits[byteIdx] = bits[byteIdx] | mask
             n = n + 1
         i = i + 1
@@ -111,7 +111,7 @@ fn DecodeBloomFilter(data: seq[uint8]): sstable_types.BloomFilter =
     return sstable_types.BloomFilter(bits: bits, numBits: numBits, numProbes: numProbes)
 
 fn MaybeContains(filter: sstable_types.BloomFilter, key: core_types.Key): bool =
-    if filter.numBits == 0 or filter.bits.len == 0:
+    if filter.numBits == 0 || filter.bits.len == 0:
         return true
     const salt1 = uint32(0x47c6a7e5)
     const salt2 = uint32(0x9e3779b1)
@@ -121,9 +121,9 @@ fn MaybeContains(filter: sstable_types.BloomFilter, key: core_types.Key): bool =
     var n: int32 = 0
     while n < filter.numProbes:
         let combined = h1 + uint32(n) * h2
-        let bitPos = int32(combined mod uint32(filter.numBits))
-        let byteIdx = bitPos shr 3
-        let mask = uint8(1 shl (bitPos & 7))
+        let bitPos = int32(combined % uint32(filter.numBits))
+        let byteIdx = bitPos >> 3
+        let mask = uint8(1 << (bitPos & 7))
         if (filter.bits[byteIdx] & mask) == uint8(0):
             return false
         n = n + 1

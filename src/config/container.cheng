@@ -1,6 +1,6 @@
 module pebble_config_container
 
-import cheng / stdlib / bootstrap / tables as tables
+import std/tables as tables
 
 type
     ServiceBase = ref
@@ -12,7 +12,7 @@ type
         ServiceTransient
 
 type
-    ServiceFactory = fn (c: ServiceContainer): ServiceBase
+    ServiceFactory = fn(c: ServiceContainer): ServiceBase
 
 type
     ServiceRegistration =
@@ -38,7 +38,7 @@ fn Register(c: ServiceContainer, name: str,
         return
     tables.TablePut[ServiceRegistration](c.registry, name,
         ServiceRegistration(factory: factory, lifecycle: lifecycle))
-    if lifecycle == ServiceSingleton and tables.TableHas[ServiceBase](c.cache, name):
+    if lifecycle == ServiceSingleton && tables.TableHas[ServiceBase](c.cache, name):
         tables.TablePut[ServiceBase](c.cache, name, nil)
 
 fn HasService(c: ServiceContainer, name: str): bool =
@@ -49,7 +49,7 @@ fn HasService(c: ServiceContainer, name: str): bool =
 fn Resolve(c: ServiceContainer, name: str): ServiceBase =
     if c == nil:
         raise newException(KeyError, "service container is nil")
-    if not tables.TableHas[ServiceRegistration](c.registry, name):
+    if ! tables.TableHas[ServiceRegistration](c.registry, name):
         raise newException(KeyError, "service not registered: " & name)
     let registration = tables.TableGet[ServiceRegistration](c.registry, name)
     if registration.lifecycle == ServiceSingleton:

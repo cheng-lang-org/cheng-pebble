@@ -1,15 +1,15 @@
 module pebble_obs_ops
 
-import "../config/loader.cheng" as config_loader
-import "./types.cheng" as obs_types
-import cheng / stdlib / bootstrap / tables as tables
-import cheng / stdlib / bootstrap / strings as strings
-import cheng / stdlib / bootstrap / std / os as os
-import cheng / stdlib / bootstrap / os as boot_os
-import cheng / stdlib / bootstrap / std / times as times
+import cheng/pebble/config/loader as config_loader
+import cheng/pebble/obs/types as obs_types
+import std/tables as tables
+import std/strings as strings
+import std/os as os
+import std/os as boot_os
+import std/std/times as times
 
 type
-    ConfigReloadCallback = fn (cfg: config_loader.FlatConfig)
+    ConfigReloadCallback = fn(cfg: config_loader.FlatConfig)
 
 type
     ConfigHotReloader = ref
@@ -24,6 +24,9 @@ type
     RuntimeCommandEntry =
         handler: obs_types.RuntimeCommand
         help: str
+
+    RuntimeCommandExecResult = tuple(ok: bool, output: str)
+    RuntimeCommandSummary = tuple(name: str, help: str)
 
 type
     RuntimeCommandRegistry = ref
@@ -57,33 +60,33 @@ fn RegisterCommand(registry: RuntimeCommandRegistry,
                    name: str,
                    help: str,
                    handler: obs_types.RuntimeCommand) =
-    if registry == nil or handler == nil or strings.len(name) == 0:
+    if registry == nil || handler == nil || strings.len(name) == 0:
         return
     tables.TablePut[RuntimeCommandEntry](registry.entries, name,
         RuntimeCommandEntry(handler: handler, help: help))
 
 fn ExecuteCommand(registry: RuntimeCommandRegistry,
                   name: str,
-                  args: seq[str]): tuple[ok: bool, output: str] =
+                  args: seq[str]): RuntimeCommandExecResult =
     if registry == nil:
-        return (false, "registry not initialized")
-    if not tables.TableHas[RuntimeCommandEntry](registry.entries, name):
-        return (false, "unknown command: " & name)
+        return RuntimeCommandExecResult(ok: false, output: "registry not initialized")
+    if ! tables.TableHas[RuntimeCommandEntry](registry.entries, name):
+        return RuntimeCommandExecResult(ok: false, output: "unknown command: " & name)
     let entry = tables.TableGet[RuntimeCommandEntry](registry.entries, name)
     if entry.handler == nil:
-        return (false, "command not available: " & name)
+        return RuntimeCommandExecResult(ok: false, output: "command not available: " & name)
     let output = entry.handler(args)
-    return (true, output)
+    return RuntimeCommandExecResult(ok: true, output: output)
 
-fn ListCommands(registry: RuntimeCommandRegistry): seq[tuple[name: str, help: str]] =
-    var out: seq[tuple[name: str, help: str]] = @[]
+fn ListCommands(registry: RuntimeCommandRegistry): seq[RuntimeCommandSummary] =
+    var out: seq[RuntimeCommandSummary]
     if registry == nil:
         return out
     var idx: int32 = 0
     var key: str = ""
     var entry: RuntimeCommandEntry
     while tables.TableNext[RuntimeCommandEntry](registry.entries, &idx, &key, &entry):
-        out.add((name: key, help: entry.help))
+        out.add(RuntimeCommandSummary(name: key, help: entry.help))
     return out
 
 fn NewConfigHotReloader(path: str,
@@ -100,13 +103,13 @@ fn NewConfigHotReloader(path: str,
     return reloader
 
 fn Poll(reloader: ConfigHotReloader) =
-    if reloader == nil or not reloader.active:
+    if reloader == nil || ! reloader.active:
         return
     let nowMs = NowMs()
-    if reloader.intervalMs > 0 and nowMs - reloader.lastCheckMs < int64(reloader.intervalMs):
+    if reloader.intervalMs > 0 && nowMs - reloader.lastCheckMs < int64(reloader.intervalMs):
         return
     reloader.lastCheckMs = nowMs
-    if strings.len(reloader.path) == 0 or not os.fileExists(reloader.path):
+    if strings.len(reloader.path) == 0 || ! os.fileExists(reloader.path):
         return
     let mtime = boot_os.fileMtime(reloader.path)
     if mtime <= reloader.lastMtime:
@@ -159,7 +162,7 @@ fn EnsureDefaults(catalog: TelemetryCatalog) =
                 exists = true
                 break
             j = j + 1
-        if not exists:
+        if ! exists:
             catalog.fields.add(candidate)
         i = i + 1
 
@@ -201,7 +204,7 @@ fn DefaultDashboard(): obs_types.DashboardTemplate =
                 unit: "count",
                 description: "Event counter by kind"
             )
-        )
+        ]
     )
 
 fn NewOpsCenter(): OpsCenter =
@@ -216,7 +219,7 @@ fn NewOpsCenter(): OpsCenter =
     return center
 
 fn RegisterReloader(ops: OpsCenter, name: str, reloader: ConfigHotReloader) =
-    if ops == nil or reloader == nil or strings.len(name) == 0:
+    if ops == nil || reloader == nil || strings.len(name) == 0:
         return
     tables.TablePut[ConfigHotReloader](ops.reloaders, name, reloader)
 
@@ -235,12 +238,12 @@ fn RegisterRuntimeCommand(ops: OpsCenter, name: str, help: str,
         return
     RegisterCommand(ops.registry, name, help, handler)
 
-fn ExecuteRuntimeCommand(ops: OpsCenter, name: str, args: seq[str]): tuple[ok: bool, output: str] =
+fn ExecuteRuntimeCommand(ops: OpsCenter, name: str, args: seq[str]): RuntimeCommandExecResult =
     if ops == nil:
-        return (false, "ops center not initialized")
+        return RuntimeCommandExecResult(ok: false, output: "ops center not initialized")
     return ExecuteCommand(ops.registry, name, args)
 
-fn ListRuntimeCommands(ops: OpsCenter): seq[tuple[name: str, help: str]] =
+fn ListRuntimeCommands(ops: OpsCenter): seq[RuntimeCommandSummary] =
     if ops == nil:
         return @[]
     return ListCommands(ops.registry)

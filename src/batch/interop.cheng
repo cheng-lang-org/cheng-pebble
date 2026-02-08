@@ -1,13 +1,13 @@
 module pebble_batch_interop
 
-import "../batch/db.cheng" as batch_db
-import "../batch/batch.cheng" as batch_impl
-import "../batch/types.cheng" as batch_types
-import "../core/types.cheng" as core_types
-import "../mem/types.cheng" as mem_types
-import "../runtime/resource_manager.cheng" as resource
-import cheng / stdlib / bootstrap / core / option as option
-import cheng / stdlib / bootstrap / strings as strings
+import cheng/pebble/batch/db as batch_db
+import cheng/pebble/batch/batch as batch_impl
+import cheng/pebble/batch/types as batch_types
+import cheng/pebble/core/types as core_types
+import cheng/pebble/mem/types as mem_types
+import cheng/pebble/runtime/resource_manager as resource
+import std/option as option
+import std/strings as strings
 
 
 type
@@ -23,7 +23,7 @@ type
         value: str
 
 type
-    BatchEntry = tuple[key: str, value: str]
+    BatchEntry = tuple(key: str, value: str)
     BatchState = seq[BatchEntry]
 
 fn findKey(state: BatchState, key: str): int32 =
@@ -40,9 +40,9 @@ fn HasKey(state: BatchState, key: str): bool =
 fn SetValue(state: var BatchState, key: str, value: str) =
     let idx = findKey(state, key)
     if idx >= 0:
-        state[idx] = (key: key, value: value)
+        state[idx] = BatchEntry(key: key, value: value)
     else:
-        state.add((key: key, value: value))
+        state.add(BatchEntry(key: key, value: value))
 
 fn DelKey(state: var BatchState, key: str) =
     let idx = findKey(state, key)
@@ -62,7 +62,7 @@ fn GetOrDefault(state: BatchState, key: str, fallback: str = ""): str =
     return fallback
 
 fn CloneState(state: BatchState): BatchState =
-    var out: BatchState = @[]
+    var out: BatchState
     var i: int32 = 0
     while i < state.len:
         out.add(state[i])
@@ -70,14 +70,14 @@ fn CloneState(state: BatchState): BatchState =
     return out
 
 fn DiffStates(lhs: BatchState, rhs: BatchState): seq[str] =
-    var diffs: seq[str] = @[]
+    var diffs: seq[str]
     var i: int32 = 0
     while i < lhs.len:
         let entry = lhs[i]
         let leftKey = entry[0]
         let leftVal = entry[1]
         let rightOpt = GetValue(rhs, leftKey)
-        if not option.IsSome(rightOpt):
+        if ! option.IsSome(rightOpt):
             diffs.add("key '" & leftKey & "' missing in rhs")
         else:
             let rightVal = option.Get(rightOpt)
@@ -88,7 +88,7 @@ fn DiffStates(lhs: BatchState, rhs: BatchState): seq[str] =
     while j < rhs.len:
         let entry = rhs[j]
         let rightKey = entry[0]
-        if not HasKey(lhs, rightKey):
+        if ! HasKey(lhs, rightKey):
             diffs.add("key '" & rightKey & "' missing in lhs")
         j = j + 1
     return diffs
@@ -128,7 +128,19 @@ fn DefaultDbConfig(): batch_types.DBConfig =
         maxConcurrentCommits: 1,
         defaultOptions: batch_types.DefaultWriteOptions,
         backpressure: nil,
-        walWriter: nil
+        walWriter: nil,
+        walPath: "",
+        walMaxSegmentBytes: 0,
+        manifestPath: "",
+        sstableDir: "",
+        autoFlush: false,
+        flushLevel: 0,
+        tableBlockSize: 32 * 1024,
+        tableBloomBitsPerKey: 10,
+        createIfMissing: true,
+        enableRecovery: true,
+        replayTailTolerance: true,
+        resetWalOnFlush: true
     )
 
 fn ApplyOperations(db: batch_db.DB,
@@ -147,7 +159,7 @@ fn ApplyOperations(db: batch_db.DB,
             batch_impl.Delete(batch, key)
         else:
             batch_impl.Merge(batch, key, op.value)
-        discard batch_db.Commit(db, batch)
+        batch_db.Commit(db, batch)
         if op.kind == BopDelete:
             if HasKey(state, op.key):
                 DelKey(state, op.key)
@@ -160,6 +172,6 @@ fn ApplyOperations(db: batch_db.DB,
         i = i + 1
 
 fn ApplyOperations(db: batch_db.DB, ops: seq[BatchOperation]): BatchState =
-    var state: BatchState = @[]
+    var state: BatchState
     ApplyOperations(db, ops, state)
     return state

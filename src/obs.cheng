@@ -1,11 +1,11 @@
 module pebble_obs
 
-import "./obs/types.cheng" as obs_types
-import "./obs/events.cheng" as obs_events
-import "./obs/metrics.cheng" as obs_metrics
-import "./obs/ops.cheng" as obs_ops
-import "./obs/profiling.cheng" as obs_profiling
-import "./obs/manager.cheng" as obs_manager
+import cheng/pebble/obs/types as obs_types
+import cheng/pebble/obs/events as obs_events
+import cheng/pebble/obs/metrics as obs_metrics
+import cheng/pebble/obs/ops as obs_ops
+import cheng/pebble/obs/profiling as obs_profiling
+import cheng/pebble/obs/manager as obs_manager
 
 type
     MetricKind = obs_types.MetricKind
@@ -28,6 +28,8 @@ type
     EventBus = obs_events.EventBus
     MetricsRegistry = obs_metrics.MetricsRegistry
     OpsCenter = obs_ops.OpsCenter
+    RuntimeCommandExecResult = obs_ops.RuntimeCommandExecResult
+    RuntimeCommandSummary = obs_ops.RuntimeCommandSummary
     Profiler = obs_profiling.Profiler
     ObservabilityOptions = obs_manager.ObservabilityOptions
     Observability = obs_manager.Observability
@@ -91,10 +93,10 @@ fn RegisterRuntimeCommand(ops: OpsCenter, name: str, help: str,
                           handler: RuntimeCommand) =
     obs_ops.RegisterRuntimeCommand(ops, name, help, handler)
 
-fn ExecuteRuntimeCommand(ops: OpsCenter, name: str, args: seq[str]): tuple[ok: bool, output: str] =
+fn ExecuteRuntimeCommand(ops: OpsCenter, name: str, args: seq[str]): RuntimeCommandExecResult =
     return obs_ops.ExecuteRuntimeCommand(ops, name, args)
 
-fn ListRuntimeCommands(ops: OpsCenter): seq[tuple[name: str, help: str]] =
+fn ListRuntimeCommands(ops: OpsCenter): seq[RuntimeCommandSummary] =
     return obs_ops.ListRuntimeCommands(ops)
 
 fn NewProfiler(): Profiler =
@@ -105,13 +107,16 @@ fn RegisterSink(profiler: Profiler, sink: obs_profiling.ProfilingSink) =
 
 fn ProfileBlock(profiler: Profiler, metrics: MetricsRegistry,
                 bus: EventBus, name: str,
-                labels: seq[LabelPair] = @[], body: fn ()) =
+                labels: seq[LabelPair] = @[], body: fn()) =
     obs_profiling.ProfileBlock(profiler, metrics, bus, name, labels, body)
 
 fn DefaultObservabilityOptions(): ObservabilityOptions =
     return obs_manager.DefaultObservabilityOptions()
 
-fn NewObservability(options: ObservabilityOptions = DefaultObservabilityOptions()): Observability =
+fn NewObservability(): Observability =
+    return obs_manager.NewObservability()
+
+fn NewObservability(options: ObservabilityOptions): Observability =
     return obs_manager.NewObservability(options)
 
 fn PublishEvent(obs: Observability,
@@ -130,9 +135,15 @@ fn ExportStatsd(obs: Observability, prefix: str = ""): seq[str] =
 fn AttachConfigHotReload(obs: Observability,
                          name: str,
                          path: str,
-                         intervalMs: int32 = 1000,
                          callback: obs_ops.ConfigReloadCallback) =
-    obs_manager.AttachConfigHotReload(obs, name, path, intervalMs, callback)
+    obs_manager.AttachConfigHotReload(obs, name, path, callback)
+
+fn AttachConfigHotReload(obs: Observability,
+                         name: str,
+                         path: str,
+                         intervalMs: int32,
+                         callback: obs_ops.ConfigReloadCallback) =
+    obs_manager.AttachConfigHotReloadWithInterval(obs, name, path, intervalMs, callback)
 
 fn RunMetricSelfChecks(obs: Observability): seq[str] =
     return obs_manager.RunMetricSelfChecks(obs)

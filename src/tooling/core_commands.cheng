@@ -1,11 +1,12 @@
 module pebble_tooling_core_commands
 
-import "../config/loader.cheng" as config_loader
-import "../core/module_map.cheng" as core_module_map
-import "./cli_core.cheng" as cli_core
-import cheng / stdlib / bootstrap / tables as tables
-import cheng / stdlib / bootstrap / strings as strings
-import cheng / stdlib / bootstrap / std / strutils as strutils
+import cheng/pebble/config/loader as config_loader
+import cheng/pebble/core/module_map as core_module_map
+import cheng/pebble/qa as qa
+import cheng/pebble/tooling/cli_core as cli_core
+import std/tables as tables
+import std/strings as strings
+import std/std/strutils as strutils
 
 fn moduleMapHandler(ctx: cli_core.CliContext, args: seq[str]) =
     ctx
@@ -45,6 +46,40 @@ fn configDumpHandler(ctx: cli_core.CliContext, args: seq[str]) =
     while tables.TableNext[str](cfg, &idx, &key, &value):
         echo(key & "=" & value)
 
+fn qaProductionHandler(ctx: cli_core.CliContext, args: seq[str]) =
+    ctx
+    var rootDir = "./pebble_qa_prod"
+    var positionalUsed = false
+    var i: int32 = 0
+    while i < args.len:
+        let arg = args[i]
+        if strutils.startsWith(arg, "--dir="):
+            let parts = strutils.split(arg, '=')
+            if parts.len > 1:
+                rootDir = parts[1]
+        elif arg == "--dir":
+            cli_core.RaiseCliError("use --dir=<path>")
+        elif arg == "-h" || arg == "--help":
+            echo("Usage:")
+            echo("  qa-production [--dir=<path>]")
+            return
+        elif ! positionalUsed:
+            rootDir = arg
+            positionalUsed = true
+        else:
+            cli_core.RaiseCliError("unexpected argument: " & arg)
+        i = i + 1
+    let findings = qa.RunProductionClosureScenario(rootDir)
+    if findings.len == 0:
+        echo("production-closure: OK (" & rootDir & ")")
+        return
+    echo("production-closure: FAILED (" & rootDir & ")")
+    var j: int32 = 0
+    while j < findings.len:
+        echo("  - " & findings[j])
+        j = j + 1
+    cli_core.RaiseCliError("production closure checks failed")
+
 fn RegisterCoreCommands(root: cli_core.CliCommand) =
     let moduleMapCmd = cli_core.NewCliCommand("module-map",
         "list the Go package to Cheng module mapping",
@@ -60,3 +95,8 @@ fn RegisterCoreCommands(root: cli_core.CliCommand) =
         configDumpHandler,
         details)
     cli_core.AddSubcommand(root, configDumpCmd)
+
+    let qaProdCmd = cli_core.NewCliCommand("qa-production",
+        "run persistence/restart production-closure checks",
+        qaProductionHandler)
+    cli_core.AddSubcommand(root, qaProdCmd)

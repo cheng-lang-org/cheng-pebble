@@ -1,8 +1,10 @@
 module pebble_qa
 
-import "./qa/dsl.cheng" as qa_dsl
-import "./qa/differ.cheng" as qa_differ
-import "./qa/metamorphic.cheng" as qa_metamorphic
+import cheng/pebble/qa/dsl as qa_dsl
+import cheng/pebble/qa/differ as qa_differ
+import cheng/pebble/qa/metamorphic as qa_metamorphic
+import cheng/pebble/qa/production_closure as qa_prod
+import cheng/pebble/batch/types as batch_types
 
 
 type
@@ -30,3 +32,9 @@ fn RunScenario(actions: seq[QAAction], cfg: QARunnerConfig = DefaultQARunnerConf
 
 fn LatestState(result: QARunResult): BatchState =
     return qa_metamorphic.LatestState(result)
+
+fn DefaultProductionDbConfig(rootDir: str): batch_types.DBConfig =
+    return qa_prod.DefaultProductionDbConfig(rootDir)
+
+fn RunProductionClosureScenario(rootDir: str): seq[str] =
+    return qa_prod.RunProductionClosureScenario(rootDir)
