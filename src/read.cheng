@@ -83,15 +83,18 @@ fn SetPrefix(it: ReadIterator, prefix: option.Option[str]) =
 fn ClearPrefix(it: ReadIterator) =
     read_iterators.ClearPrefix(it)
 
-iterator Range(it: ReadIterator, range: ReadRange = EmptyRange(), prefix: option.Option[str] = option.none(str)): MaterializedEntry =
-    for entry in read_iterators.Range(it, range, prefix):
-        yield entry
+iterator Range(it: ReadIterator, range: ReadRange = EmptyRange(), prefix: option.Option[str] = option.None[str]()): MaterializedEntry =
+    let entries = read_iterators.CollectRange(it, range, prefix)
+    var i: int32 = 0
+    while i < entries.len:
+        yield entries[i]
+        i = i + 1
 
 fn NewTraceOp(kind: TraceOpKind,
-              key: option.Option[str] = option.none(str),
-              prefix: option.Option[str] = option.none(str),
-              lower: option.Option[str] = option.none(str),
-              upper: option.Option[str] = option.none(str)): ReadTraceOp =
+              key: option.Option[str] = option.None[str](),
+              prefix: option.Option[str] = option.None[str](),
+              lower: option.Option[str] = option.None[str](),
+              upper: option.Option[str] = option.None[str]()): ReadTraceOp =
     return read_trace.NewTraceOp(kind, key, prefix, lower, upper)
 
 fn TraceIterator(it: ReadIterator, ops: seq[ReadTraceOp]): ReadTrace =

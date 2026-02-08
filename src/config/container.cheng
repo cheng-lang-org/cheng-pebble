@@ -25,7 +25,8 @@ type
         cache: tables.Table[ServiceBase]
 
 fn NewServiceContainer(): ServiceContainer =
-    var container: ServiceContainer = new[ServiceContainer]()
+    var container: ServiceContainer
+    new container
     if container != nil:
         container.registry = tables.TableInit[ServiceRegistration](32)
         container.cache = tables.TableInit[ServiceBase](32)
@@ -48,9 +49,9 @@ fn HasService(c: ServiceContainer, name: str): bool =
 
 fn Resolve(c: ServiceContainer, name: str): ServiceBase =
     if c == nil:
-        raise newException(KeyError, "service container is nil")
+        raise KeyError(msg: "service container is nil")
     if ! tables.TableHas[ServiceRegistration](c.registry, name):
-        raise newException(KeyError, "service not registered: " & name)
+        raise KeyError(msg: "service not registered: " & name)
     let registration = tables.TableGet[ServiceRegistration](c.registry, name)
     if registration.lifecycle == ServiceSingleton:
         if tables.TableHas[ServiceBase](c.cache, name):

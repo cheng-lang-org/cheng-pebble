@@ -1,12 +1,14 @@
 module pebble_manifest_tools
 
+import cheng/pebble/core/text as text
 import cheng/pebble/core/types as core_types
 import cheng/pebble/manifest/types as man_types
 import cheng/pebble/manifest/version as man_version
 import cheng/pebble/manifest/store as man_store
 import std/strings as strings
 import std/os as os
-import std/std/strutils as strutils
+import std/system as sys
+import std/strutils as strutils
 
 type
     IssueKind = enum
@@ -71,7 +73,7 @@ fn verifyLevels(version: man_version.Version, report: var ManifestCompatibilityR
             if ! first:
                 if core_types.CompareBytewise(prevLargest, meta.smallest) >= 0:
                     AddIssue(report, IssueError,
-                        "level " & toString(entry.level) &
+                        "level " & text.toText(entry.level) &
                         " file range overlap: " & man_types.Describe(meta))
                     break
             prevLargest = meta.largest
@@ -104,11 +106,11 @@ fn CheckManifestCompatibility(manifestPath: str,
             seenSnapshot = true
         else:
             if current == nil:
-                raise newException(man_types.ManifestError, "missing snapshot before edit replay")
+                raise man_types.ManifestError(msg: "missing snapshot before edit replay")
             current = man_version.ApplyEdit(current, record.edit)
         i = i + 1
     if ! seenSnapshot:
-        raise newException(man_types.ManifestError, "manifest missing snapshot record")
+        raise man_types.ManifestError(msg: "manifest missing snapshot record")
     if targetFormat == man_store.ManifestFormatV1 && report.detectedFormat != man_store.ManifestFormatV1:
         AddIssue(report, IssueError,
             "manifest uses " & ManifestFormatName(report.detectedFormat) &
@@ -130,7 +132,7 @@ fn rewriteManifest(records: seq[man_store.ManifestRecord],
             wroteSnapshot = true
         else:
             if ! wroteSnapshot:
-                raise newException(man_types.ManifestError, "manifest missing snapshot, cannot rewrite")
+                raise man_types.ManifestError(msg: "manifest missing snapshot, cannot rewrite")
             man_store.AppendEdit(outStore, record.edit)
         i = i + 1
     man_store.Sync(outStore)

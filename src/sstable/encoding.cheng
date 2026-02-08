@@ -8,15 +8,15 @@ fn AppendStrBytes(buffer: var seq[uint8], text: str) =
     let n: int32 = strings.len(text)
     var i: int32 = 0
     while i < n:
-        let ch = strings.charAt(text, i)
-        buffer.add(uint8(sys.ord(ch)))
+        let ch = text[i]
+        buffer.add(uint8(int32(ch)))
         i = i + 1
 
 fn BytesToStr(data: seq[uint8], start: int32, length: int32): str =
     if length <= 0:
         return ""
     if start < 0 || start + length > data.len:
-        raise newException(sstable_types.SSTError, "bytes slice out of range")
+        raise sstable_types.SSTError(msg: "bytes slice out of range")
     var out: str = ""
     var i: int32 = 0
     while i < length:
@@ -45,7 +45,7 @@ fn DecodeVarint(data: seq[uint8], pos: int32*): uint64 =
     var result: uint64 = 0
     while true:
         if *pos >= data.len:
-            raise newException(sstable_types.SSTError, "varint truncated")
+            raise sstable_types.SSTError(msg: "varint truncated")
         let byte = data[*pos]
         *pos = *pos + 1
         result = result | (uint64(byte & uint8(0x7f)) << shift)
@@ -53,7 +53,7 @@ fn DecodeVarint(data: seq[uint8], pos: int32*): uint64 =
             break
         shift = shift + 7
         if shift > 63:
-            raise newException(sstable_types.SSTError, "varint overflow")
+            raise sstable_types.SSTError(msg: "varint overflow")
     return result
 
 fn AppendBytes(buffer: var seq[uint8], payload: str) =
@@ -63,7 +63,7 @@ fn AppendBytes(buffer: var seq[uint8], payload: str) =
 fn ReadBytes(data: seq[uint8], pos: int32*): str =
     let length = int32(DecodeVarint(data, pos))
     if *pos + length > data.len:
-        raise newException(sstable_types.SSTError, "payload truncated")
+        raise sstable_types.SSTError(msg: "payload truncated")
     let out = BytesToStr(data, *pos, length)
     *pos = *pos + length
     return out

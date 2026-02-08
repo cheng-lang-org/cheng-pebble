@@ -5,69 +5,79 @@ import cheng/pebble/mem/types as mem_types
 import cheng/pebble/runtime/executor as exec
 import cheng/pebble/runtime/resource_manager as resource
 import std/option as option
+import std/strings as strings
 
 const
     EntryOverhead = 16
 
 type
-    LookupResult = tuple(found: bool, value: option.Option[str])
+    LookupResult = ref
+        found: bool
+        value: option.Option[str]
 
 fn defaultComparator(): core_types.Comparator =
     return core_types.CompareBytewise
 
 fn InitMemTable(cfg: mem_types.MemTableConfig): mem_types.MemTable =
-    var table: mem_types.MemTable = new[mem_types.MemTable]()
+    var table: mem_types.MemTable
+    new table
     if table == nil:
         return table
-    var normalized = cfg
-    mem_types.Normalize(normalized.throttleConfig)
-    table.cfg = normalized
-    table.base = new[mem_types.Flushable]()
+    table.cfg = cfg
+    var base: mem_types.Flushable
+    new base
+    table.base = base
     if table.base != nil:
-        table.base.comparator = if table.cfg.comparator != nil: table.cfg.comparator else: defaultComparator()
-        table.base.approxBytes = 0
-        table.base.frozen = false
-    table.records = @[]
+        let baseRef = table.base
+        if cfg.comparator != nil:
+            baseRef.comparator = cfg.comparator
+        else:
+            baseRef.comparator = defaultComparator()
+        baseRef.approxBytes = 0
+        baseRef.frozen = false
+    table.records = newSeq[mem_types.MemRecord]()
     table.bytesUsed = 0
-    table.lastSeq = core_types.ToSequence(0)
-    table.tickets = @[]
+    table.lastSeq = uint64(0)
+    table.tickets = newSeq[resource.ResourceTicket]()
     table.flushScheduled = false
     table.throttleActive = false
     table.lastThrottleDelayMs = 0
     return table
 
 fn verifySequence(mt: mem_types.MemTable, seq: core_types.SequenceNumber) =
-    if core_types.ToUint64(seq) < core_types.ToUint64(mt.lastSeq):
-        raise newException(mem_types.MemError, "sequence numbers must be monotonically increasing")
+    if uint64(seq) < uint64(mt.lastSeq):
+        raise mem_types.MemError(msg: "sequence numbers must be monotonically increasing")
 
 fn triggerFlush(mt: mem_types.MemTable) =
-    if mt.cfg.flushTrigger == nil:
+    let cfg = mt.cfg
+    if cfg.flushTrigger == nil:
         return
     if mt.flushScheduled:
         return
     mt.flushScheduled = true
-    let trigger = mt.cfg.flushTrigger
+    let trigger = cfg.flushTrigger
     let target = mt.base
-    if mt.cfg.flushExecutor == nil:
-        trigger(target)
-    else:
-        let task = fn() =
-            trigger(target)
-        exec.Submit(mt.cfg.flushExecutor, task)
+    cfg.flushExecutor
+    trigger(target)
 
 fn markFrozenForFlush(mt: mem_types.MemTable) =
-    if mt.base != nil:
-        mt.base.frozen = true
+    let baseRef = mt.base
+    if baseRef != nil:
+        baseRef.frozen = true
     triggerFlush(mt)
 
 fn computeStallLimit(mt: mem_types.MemTable): int32 =
-    if mt.cfg.throttleConfig.stallLimitBytes > 0:
-        return mt.cfg.throttleConfig.stallLimitBytes
-    return mt.cfg.softLimitBytes
+    let cfg = mt.cfg
+    let throttle = cfg.throttleConfig
+    if throttle.stallLimitBytes > 0:
+        return throttle.stallLimitBytes
+    return cfg.softLimitBytes
 
 fn computeReleaseTarget(mt: mem_types.MemTable, stallLimit: int32): int32 =
-    if mt.cfg.throttleConfig.releaseTargetBytes > 0:
-        return mt.cfg.throttleConfig.releaseTargetBytes
+    let cfg = mt.cfg
+    let throttle = cfg.throttleConfig
+    if throttle.releaseTargetBytes > 0:
+        return throttle.releaseTargetBytes
     if stallLimit <= 0:
         return 0
     let reduction = max(1, stallLimit / 4)
@@ -76,24 +86,36 @@ fn computeReleaseTarget(mt: mem_types.MemTable, stallLimit: int32): int32 =
 fn reserveBytes(mt: mem_types.MemTable, bytes: int32) =
     if bytes <= 0:
         return
+    let cfg = mt.cfg
     let projected = mt.bytesUsed + bytes
-    if mt.cfg.hardLimitBytes > 0 && projected > mt.cfg.hardLimitBytes:
-        raise newException(mem_types.MemError, "memtable capacity exceeded (hard limit)")
-    if mt.cfg.resourceManager != nil:
-        let ticket = resource.AcquireQuota(mt.cfg.resourceManager, mt.cfg.resourceKind, bytes.int64)
-        mt.tickets.add(ticket)
+    if cfg.hardLimitBytes > 0 && projected > cfg.hardLimitBytes:
+        raise mem_types.MemError(msg: "memtable capacity exceeded (hard limit)")
+    let rm = cfg.resourceManager
+    if rm != nil:
+        let ticket = resource.AcquireQuota(rm, cfg.resourceKind, bytes.int64)
+        var tickets = mt.tickets
+        tickets.add(ticket)
+        mt.tickets = tickets
     mt.bytesUsed = projected
-    if mt.base != nil:
-        mt.base.approxBytes = projected
-    if mt.cfg.resourceManager != nil && resource.IsSoftExceeded(mt.cfg.resourceManager, mt.cfg.resourceKind):
+    let baseRef = mt.base
+    if baseRef != nil:
+        baseRef.approxBytes = projected
+    if rm != nil && resource.IsSoftExceeded(rm, cfg.resourceKind):
         markFrozenForFlush(mt)
 
 fn checkWritable(mt: mem_types.MemTable) =
-    if mt.base != nil && mt.base.frozen:
-        raise newException(mem_types.MemError, "memtable is frozen and cannot accept new writes")
+    let baseRef = mt.base
+    if baseRef != nil && baseRef.frozen:
+        raise mem_types.MemError(msg: "memtable is frozen and cannot accept new writes")
 
 fn estimateEntryBytes(key: core_types.Key, value: str): int32 =
-    return core_types.ToBytes(key).len + value.len + EntryOverhead
+    var keyBytes = core_types.ToBytes(key)
+    if keyBytes == nil:
+        keyBytes = ""
+    var payload = value
+    if payload == nil:
+        payload = ""
+    return strings.len(keyBytes) + strings.len(payload) + EntryOverhead
 
 fn appendRecord(mt: mem_types.MemTable, key: core_types.Key,
                 seq: core_types.SequenceNumber,
@@ -103,10 +125,13 @@ fn appendRecord(mt: mem_types.MemTable, key: core_types.Key,
     verifySequence(mt, seq)
     let sizeBytes = estimateEntryBytes(key, value)
     reserveBytes(mt, sizeBytes)
-    mt.records.add(mem_types.MemRecord(key: key, seq: seq, kind: kind, value: value))
-    if core_types.ToUint64(seq) >= core_types.ToUint64(mt.lastSeq):
+    var records = mt.records
+    records.add(mem_types.MemRecord(key: key, seq: seq, kind: kind, value: value))
+    mt.records = records
+    if uint64(seq) >= uint64(mt.lastSeq):
         mt.lastSeq = seq
-    if mt.cfg.softLimitBytes > 0 && mt.bytesUsed >= mt.cfg.softLimitBytes:
+    let cfg = mt.cfg
+    if cfg.softLimitBytes > 0 && mt.bytesUsed >= cfg.softLimitBytes:
         markFrozenForFlush(mt)
 
 fn Put(mt: mem_types.MemTable, key: core_types.Key, value: str,
@@ -121,61 +146,62 @@ fn Merge(mt: mem_types.MemTable, key: core_types.Key,
          operand: str,
          seq: core_types.SequenceNumber) =
     if ! mem_types.HasMerge(mt.cfg):
-        raise newException(mem_types.MemError, "merge requested without configured merge operator")
+        raise mem_types.MemError(msg: "merge requested without configured merge operator")
     appendRecord(mt, key, seq, mem_types.MemValueMerge, operand)
 
-fn PrecheckApplyBatch(mt: mem_types.MemTable, entries: openArray[mem_types.ApplyEntry]) =
+fn PrecheckApplyBatch(mt: mem_types.MemTable, entries: seq[mem_types.ApplyEntry]) =
     if mt == nil:
-        raise newException(mem_types.MemError, "memtable is nil")
+        raise mem_types.MemError(msg: "memtable is nil")
     checkWritable(mt)
-    if entries.len == 0:
+    if len(entries) == 0:
         return
+    let cfg = mt.cfg
     var projected = mt.bytesUsed
-    var prevSeq = core_types.ToUint64(mt.lastSeq)
-    var reserveDelta: int64 = 0
-    for entry in entries:
-        let seqValue = core_types.ToUint64(entry.seq)
+    var prevSeq = uint64(mt.lastSeq)
+    var i: int32 = 0
+    while i < len(entries):
+        let entry = entries[i]
+        let seqValue = uint64(entry.seq)
         if seqValue < prevSeq:
-            raise newException(mem_types.MemError,
-                "sequence numbers must be monotonically increasing")
+            raise mem_types.MemError(msg: "sequence numbers must be monotonically increasing")
         prevSeq = seqValue
         if entry.kind == mem_types.MemValueMerge && ! mem_types.HasMerge(mt.cfg):
-            raise newException(mem_types.MemError,
-                "merge requested without configured merge operator")
+            raise mem_types.MemError(msg: "merge requested without configured merge operator")
         let sizeBytes = estimateEntryBytes(entry.key, entry.value)
-        if mt.cfg.hardLimitBytes > 0 && projected + sizeBytes > mt.cfg.hardLimitBytes:
-            raise newException(mem_types.MemError, "memtable capacity exceeded (hard limit)")
+        if cfg.hardLimitBytes > 0 && projected + sizeBytes > cfg.hardLimitBytes:
+            raise mem_types.MemError(msg: "memtable capacity exceeded (hard limit)")
         projected = projected + sizeBytes
-        reserveDelta = reserveDelta + sizeBytes.int64
-    if mt.cfg.resourceManager != nil:
-        let rm = mt.cfg.resourceManager
-        let idx = int32(mt.cfg.resourceKind)
-        if ! rm.hasQuota[idx]:
-            raise newException(mem_types.MemError, "resource quota not configured for memtable kind")
-        let quota = rm.quotas[idx]
-        if quota.hardLimit > 0 && quota.inUse + reserveDelta > quota.hardLimit:
-            raise newException(mem_types.MemError, "memtable capacity exceeded (resource hard limit)")
+        i = i + 1
 
-fn ApplyBatch(mt: mem_types.MemTable, entries: openArray[mem_types.ApplyEntry]) =
+fn ApplyBatch(mt: mem_types.MemTable, entries: seq[mem_types.ApplyEntry]) =
     if mt == nil:
-        raise newException(mem_types.MemError, "memtable is nil")
-    if entries.len == 0:
+        raise mem_types.MemError(msg: "memtable is nil")
+    if len(entries) == 0:
         return
     PrecheckApplyBatch(mt, entries)
     var totalBytes: int32 = 0
-    for entry in entries:
+    var i: int32 = 0
+    while i < len(entries):
+        let entry = entries[i]
         totalBytes = totalBytes + estimateEntryBytes(entry.key, entry.value)
+        i = i + 1
     reserveBytes(mt, totalBytes)
-    for entry in entries:
-        mt.records.add(mem_types.MemRecord(
+    i = 0
+    while i < len(entries):
+        let entry = entries[i]
+        var records = mt.records
+        records.add(mem_types.MemRecord(
             key: entry.key,
             seq: entry.seq,
             kind: entry.kind,
             value: entry.value
         ))
-        if core_types.ToUint64(entry.seq) >= core_types.ToUint64(mt.lastSeq):
+        mt.records = records
+        if uint64(entry.seq) >= uint64(mt.lastSeq):
             mt.lastSeq = entry.seq
-    if mt.cfg.softLimitBytes > 0 && mt.bytesUsed >= mt.cfg.softLimitBytes:
+        i = i + 1
+    let cfg = mt.cfg
+    if cfg.softLimitBytes > 0 && mt.bytesUsed >= cfg.softLimitBytes:
         markFrozenForFlush(mt)
 
 fn AdmitWrite(mt: mem_types.MemTable,
@@ -183,7 +209,8 @@ fn AdmitWrite(mt: mem_types.MemTable,
               incomingBytes: int32): int32 =
     if mt == nil || incomingBytes <= 0:
         return 0
-    let cfg = mt.cfg.throttleConfig
+    let tableCfg = mt.cfg
+    let cfg = tableCfg.throttleConfig
     let stallLimit = computeStallLimit(mt)
     if ! mem_types.ThrottleEnabled(cfg) || stallLimit <= 0:
         if mt.throttleActive:
@@ -215,7 +242,7 @@ fn AdmitWrite(mt: mem_types.MemTable,
     let baseDelay = max(1, cfg.baseDelayMs)
     let maxDelay = max(baseDelay, cfg.maxDelayMs)
     let over = projected - stallLimit
-    var ratio = over.float / max(1, stallLimit).float
+    var ratio = float64(over) / float64(max(1, stallLimit))
     if ratio > 1.0:
         ratio = 1.0
     let dynamic = int32(ratio * float64(maxDelay - baseDelay) * scaleValue)
@@ -231,34 +258,37 @@ fn mergeResolve(mt: mem_types.MemTable, key: core_types.Key,
     if operands.len == 0:
         return base
     if ! mem_types.HasMerge(mt.cfg):
-        raise newException(mem_types.MemError, "merge resolution requested without operator")
+        raise mem_types.MemError(msg: "merge resolution requested without operator")
     var ordered = newSeq[str](operands.len)
     var i: int32 = 0
     let last = operands.len - 1
     while i < operands.len:
         ordered[i] = operands[last - i]
         i = i + 1
-    return mt.cfg.mergeOperator(key, base, ordered)
+    let cfg = mt.cfg
+    return cfg.mergeOperator(key, base, ordered)
 
 fn Lookup(mt: mem_types.MemTable,
           key: core_types.Key,
           snapshot: core_types.SequenceNumber): LookupResult =
-    let snapValue = core_types.ToUint64(snapshot)
+    let snapValue = uint64(snapshot)
     var operands = newSeq[str]()
-    var base = option.none(str)
+    var base = option.None[str]()
     var seen = false
     if mt == nil:
-        return LookupResult(found: false, value: option.none(str))
-    var idx: int32 = mt.records.len - 1
+        return LookupResult(found: false, value: option.None[str]())
+    let records = mt.records
+    var idx: int32 = records.len - 1
+    let baseRef = mt.base
     while idx >= 0:
-        let record = mt.records[idx]
-        if mt.base != nil && mt.base.comparator != nil:
-            if mt.base.comparator(key, record.key) != 0:
+        let record = records[idx]
+        if baseRef != nil && baseRef.comparator != nil:
+            if baseRef.comparator(key, record.key) != 0:
                 if idx == 0:
                     break
                 idx = idx - 1
                 continue
-        if core_types.ToUint64(record.seq) > snapValue:
+        if uint64(record.seq) > snapValue:
             if idx == 0:
                 break
             idx = idx - 1
@@ -268,7 +298,7 @@ fn Lookup(mt: mem_types.MemTable,
             base = option.some(record.value)
             break
         elif record.kind == mem_types.MemValueDelete:
-            base = option.none(str)
+            base = option.None[str]()
             break
         else:
             operands.add(record.value)
@@ -276,7 +306,7 @@ fn Lookup(mt: mem_types.MemTable,
             break
         idx = idx - 1
     if ! seen:
-        return LookupResult(found: false, value: option.none(str))
+        return LookupResult(found: false, value: option.None[str]())
     if operands.len == 0:
         return LookupResult(found: true, value: base)
     return LookupResult(found: true, value: mergeResolve(mt, key, base, operands))
@@ -287,40 +317,55 @@ fn Get(mt: mem_types.MemTable,
     let hit = Lookup(mt, key, snapshot)
     if hit.found:
         return hit.value
-    return option.none(str)
+    return option.None[str]()
 
 fn GetLatest(mt: mem_types.MemTable, key: core_types.Key): option.Option[str] =
-    return Get(mt, key, core_types.ToSequence(uint64(0xFFFFFFFFFFFFFFFF)))
+    let hit = Lookup(mt, key, uint64(0xFFFFFFFFFFFFFFFF))
+    if hit != nil && hit.found:
+        return hit.value
+    return option.None[str]()
 
 fn Freeze(mt: mem_types.MemTable) =
-    if mt.base != nil:
-        mt.base.frozen = true
+    let baseRef = mt.base
+    if baseRef != nil:
+        baseRef.frozen = true
 
 fn ReadyForFlush(mt: mem_types.MemTable): bool =
-    if mt.base == nil:
+    let baseRef = mt.base
+    if baseRef == nil:
         return false
-    return mt.base.frozen
+    return baseRef.frozen
 
 fn NeedsFlush(mt: mem_types.MemTable): bool =
-    if mt.cfg.softLimitBytes > 0 && mt.bytesUsed >= mt.cfg.softLimitBytes:
+    let cfg = mt.cfg
+    if cfg.softLimitBytes > 0 && mt.bytesUsed >= cfg.softLimitBytes:
         return true
-    if mt.cfg.resourceManager != nil:
-        return resource.IsSoftExceeded(mt.cfg.resourceManager, mt.cfg.resourceKind)
+    if cfg.resourceManager != nil:
+        return resource.IsSoftExceeded(cfg.resourceManager, cfg.resourceKind)
     return false
 
 fn Clear(mt: mem_types.MemTable) =
     if mt == nil:
         return
-    if mt.cfg.resourceManager != nil:
-        for ticket in mt.tickets:
-            resource.Release(mt.cfg.resourceManager, ticket)
-    mt.tickets.setLen(0)
-    mt.records.setLen(0)
+    let cfg = mt.cfg
+    if cfg.resourceManager != nil:
+        let existingTickets = mt.tickets
+        var i: int32 = 0
+        while i < existingTickets.len:
+            resource.Release(cfg.resourceManager, existingTickets[i])
+            i = i + 1
+    var tickets = mt.tickets
+    tickets.setLen(0)
+    mt.tickets = tickets
+    var records = mt.records
+    records.setLen(0)
+    mt.records = records
     mt.bytesUsed = 0
-    if mt.base != nil:
-        mt.base.approxBytes = 0
-        mt.base.frozen = false
-    mt.lastSeq = core_types.ToSequence(0)
+    let baseRef = mt.base
+    if baseRef != nil:
+        baseRef.approxBytes = 0
+        baseRef.frozen = false
+    mt.lastSeq = uint64(0)
     mt.flushScheduled = false
     mt.throttleActive = false
     mt.lastThrottleDelayMs = 0
@@ -329,7 +374,31 @@ fn MarkFlushCompleted(mt: mem_types.MemTable) =
     if mt == nil:
         return
     mt.flushScheduled = false
-    if mt.base != nil:
-        mt.base.frozen = false
+    let baseRef = mt.base
+    if baseRef != nil:
+        baseRef.frozen = false
     mt.throttleActive = false
     mt.lastThrottleDelayMs = 0
+
+fn RecordCount(mt: mem_types.MemTable): int32 =
+    if mt == nil:
+        return 0
+    return mt.records.len
+
+fn RecordAt(mt: mem_types.MemTable, idx: int32): mem_types.MemRecord =
+    if mt == nil:
+        raise mem_types.MemError(msg: "memtable record index out of range")
+    if idx < 0:
+        raise mem_types.MemError(msg: "memtable record index out of range")
+    let records = mt.records
+    if idx >= records.len:
+        raise mem_types.MemError(msg: "memtable record index out of range")
+    return records[idx]
+
+fn ApproxBytes(mt: mem_types.MemTable): int32 =
+    if mt == nil:
+        return 0
+    let baseRef = mt.base
+    if baseRef == nil:
+        return 0
+    return baseRef.approxBytes

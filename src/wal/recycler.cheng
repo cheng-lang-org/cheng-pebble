@@ -13,7 +13,8 @@ type
         pool: seq[RecyclableFile]
 
 fn InitLogRecycler(maxPool: int32 = 8): LogRecycler =
-    var recycler: LogRecycler = new[LogRecycler]()
+    var recycler: LogRecycler
+    new recycler
     if recycler != nil:
         recycler.maxPool = max(0, maxPool)
         recycler.pool = @[]
@@ -26,9 +27,9 @@ fn Len(recycler: LogRecycler): int32 =
 
 fn Acquire(recycler: LogRecycler): option.Option[RecyclableFile] =
     if recycler == nil || recycler.maxPool == 0:
-        return option.none(RecyclableFile)
+        return option.None[RecyclableFile]()
     if recycler.pool.len == 0:
-        return option.none(RecyclableFile)
+        return option.None[RecyclableFile]()
     let last = recycler.pool.len - 1
     let file = recycler.pool[last]
     recycler.pool.setLen(last)

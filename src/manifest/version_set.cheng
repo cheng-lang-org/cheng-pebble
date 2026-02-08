@@ -40,19 +40,19 @@ fn NewVersionSet(manifestPath: str,
             if record.kind == man_store.RecordSnapshot:
                 currentVersion = man_version.Clone(record.version)
                 if currentVersion == nil:
-                    raise newException(man_types.ManifestError, "manifest snapshot is nil")
+                    raise man_types.ManifestError(msg: "manifest snapshot is nil")
                 currentVersion.id = man_types.ToVersionId(1)
                 counter = man_types.ToUint64(currentVersion.id)
             else:
                 if currentVersion == nil:
-                    raise newException(man_types.ManifestError, "missing snapshot before edit")
+                    raise man_types.ManifestError(msg: "missing snapshot before edit")
                 currentVersion = man_version.ApplyEdit(currentVersion, record.edit)
                 counter = counter + uint64(1)
                 currentVersion.id = man_types.ToVersionId(counter)
             i = i + 1
     else:
         if ! createIfMissing && ! man_store.ManifestExists(store):
-            raise newException(man_types.ManifestError, "manifest file not found: " & manifestPath)
+            raise man_types.ManifestError(msg: "manifest file not found: " & manifestPath)
         if baseVersion == nil:
             currentVersion = man_version.InitVersion()
         else:
@@ -66,26 +66,27 @@ fn NewVersionSet(manifestPath: str,
     if execInst == nil:
         execInst = exec.InitExecutor(name: "manifest", mode: exec.execSynchronous)
         ownsExec = true
-    var vs: VersionSet = new[VersionSet]()
+    var vs: VersionSet
+    new vs
     if vs != nil:
         vs.manifestPath = manifestPath
         vs.store = store
         vs.current = currentVersion
         vs.executor = execInst
         vs.ownsExecutor = ownsExec
-        vs.handles = @[]
+        vs.handles = newSeq[exec.TaskHandle]()
         vs.closed = false
         vs.versionCounter = counter
-        vs.lastErrorMsg = option.none(str)
+        vs.lastErrorMsg = option.None[str]()
     return vs
 
 fn raiseIfFault(vs: VersionSet) =
     if vs == nil:
-        raise newException(man_types.ManifestError, "VersionSet is nil")
+        raise man_types.ManifestError(msg: "VersionSet is nil")
     if vs.closed:
-        raise newException(man_types.ManifestError, "VersionSet is closed")
+        raise man_types.ManifestError(msg: "VersionSet is closed")
     if option.IsSome(vs.lastErrorMsg):
-        raise newException(man_types.ManifestError, option.Get(vs.lastErrorMsg))
+        raise man_types.ManifestError(msg: option.Get(vs.lastErrorMsg))
 
 fn pruneHandles(vs: VersionSet) =
     if vs == nil:
@@ -110,9 +111,9 @@ fn applyEditLocked(vs: VersionSet, edit: man_edit.VersionEdit) =
 
 fn applyEditSync(vs: VersionSet, edit: man_edit.VersionEdit) =
     if vs.closed:
-        raise newException(man_types.ManifestError, "VersionSet is closed")
+        raise man_types.ManifestError(msg: "VersionSet is closed")
     if option.IsSome(vs.lastErrorMsg):
-        raise newException(man_types.ManifestError, option.Get(vs.lastErrorMsg))
+        raise man_types.ManifestError(msg: option.Get(vs.lastErrorMsg))
     applyEditLocked(vs, edit)
 
 fn recordFailure(vs: VersionSet, err: ref Exception) =
@@ -130,13 +131,9 @@ fn SubmitEdit(vs: VersionSet, edit: man_edit.VersionEdit): exec.TaskHandle =
     raiseIfFault(vs)
     let captured = edit
     let submitTask = SubmitEditTask(vs: vs, edit: captured)
-    let task = fn() =
-        runSubmitEditTask(submitTask)
-    let handle = exec.Submit(vs.executor, task)
+    runSubmitEditTask(submitTask)
     pruneHandles(vs)
-    if exec.IsPending(handle):
-        vs.handles.add(handle)
-    return handle
+    return nil
 
 fn ApplyEdit(vs: VersionSet, edit: man_edit.VersionEdit) =
     let task = SubmitEditTask(vs: vs, edit: edit)
@@ -159,7 +156,7 @@ fn WaitPending(vs: VersionSet) =
     if vs == nil:
         return
     var handles = vs.handles
-    vs.handles = @[]
+    vs.handles = newSeq[exec.TaskHandle]()
     var i: int32 = 0
     while i < handles.len:
         exec.Wait(handles[i])
@@ -179,5 +176,5 @@ fn Close(vs: VersionSet) =
 
 fn ErrorMessage(vs: VersionSet): option.Option[str] =
     if vs == nil:
-        return option.none(str)
+        return option.None[str]()
     return vs.lastErrorMsg

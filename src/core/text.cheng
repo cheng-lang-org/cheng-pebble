@@ -1,0 +1,17 @@
+module pebble_core_text
+
+import std/strings as strings
+
+fn toText(value: str): str =
+    return value
+
+fn toText(value: bool): str =
+    if value:
+        return "true"
+    return "false"
+
+fn toText(value: char): str =
+    return strings.charToStr(value)
+
+fn toText[T](value: T): str =
+    return strings.intToStr(int32(value))

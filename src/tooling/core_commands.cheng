@@ -6,7 +6,7 @@ import cheng/pebble/qa as qa
 import cheng/pebble/tooling/cli_core as cli_core
 import std/tables as tables
 import std/strings as strings
-import std/std/strutils as strutils
+import std/strutils as strutils
 
 fn moduleMapHandler(ctx: cli_core.CliContext, args: seq[str]) =
     ctx

@@ -38,7 +38,7 @@ fn startsWith(text: str, prefix: str): bool =
         return false
     var i: int32 = 0
     while i < m:
-        if strings.charAt(text, i) != strings.charAt(prefix, i):
+        if text[i] != prefix[i]:
             return false
         i = i + 1
     return true
@@ -123,7 +123,8 @@ fn rebuildFiltered(it: ReadIterator) =
 
 fn InitReadIterator(sources: openArray[read_types.ReadSource],
                     config: read_types.ReadIteratorConfig): ReadIterator =
-    var it: ReadIterator = new[ReadIterator]()
+    var it: ReadIterator
+    new it
     if it == nil:
         return it
     var comp = config.comparator
@@ -175,7 +176,7 @@ fn SetPrefix(it: ReadIterator, prefix: option.Option[str]) =
     rebuildFiltered(it)
 
 fn ClearPrefix(it: ReadIterator) =
-    SetPrefix(it, option.none(str))
+    SetPrefix(it, option.None[str]())
 
 fn Valid(it: ReadIterator): bool =
     if it == nil:
@@ -184,7 +185,7 @@ fn Valid(it: ReadIterator): bool =
 
 fn CurrentEntry(it: ReadIterator): read_types.MaterializedEntry =
     if ! Valid(it):
-        raise newException(read_types.ReadError, "iterator is not valid")
+        raise read_types.ReadError(msg: "iterator is not valid")
     return it.filtered[it.idx]
 
 fn Key(it: ReadIterator): core_types.Key =
@@ -262,11 +263,12 @@ fn SeekPrefixGE(it: ReadIterator, prefix: str, key: core_types.Key): bool =
     SetPrefix(it, option.some(prefix))
     return SeekGE(it, key)
 
-iterator Range(it: ReadIterator,
-               range: read_types.ReadRange = read_types.EmptyRange(),
-               prefix: option.Option[str] = option.none(str)): read_types.MaterializedEntry =
+fn CollectRange(it: ReadIterator,
+                range: read_types.ReadRange = read_types.EmptyRange(),
+                prefix: option.Option[str] = option.None[str]()): seq[read_types.MaterializedEntry] =
+    var out = newSeq[read_types.MaterializedEntry]()
     if it == nil:
-        return
+        return out
     let effectivePrefix = if option.IsSome(prefix): prefix else: it.prefixFilter
     let effectiveRange =
         if option.IsSome(range.lower) || option.IsSome(range.upper): range else: it.bounds
@@ -279,5 +281,15 @@ iterator Range(it: ReadIterator,
         if ! matchesPrefix(effectivePrefix, entry.key):
             idx = idx + 1
             continue
-        yield entry
+        out.add(entry)
         idx = idx + 1
+    return out
+
+iterator Range(it: ReadIterator,
+               range: read_types.ReadRange = read_types.EmptyRange(),
+               prefix: option.Option[str] = option.None[str]()): read_types.MaterializedEntry =
+    let entries = CollectRange(it, range, prefix)
+    var i: int32 = 0
+    while i < entries.len:
+        yield entries[i]
+        i = i + 1

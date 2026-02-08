@@ -43,3 +43,22 @@ If persistence paths are provided, startup will recover from manifest + WAL and 
 
 Use `RunProductionClosureScenario(rootDir)` from `src/qa.cheng` to run a durability smoke scenario covering restart recovery and delete semantics.
 Tooling command: `qa-production [--dir=<path>]`.
+
+## Production Closure
+
+One-command compile + run closure:
+
+```bash
+CHENG_LANG_ROOT=/absolute/path/to/cheng-lang \
+sh scripts/production_closure.sh --dir=/tmp/pebble_qa_prod
+```
+
+Prerequisites:
+- `CHENG_LANG_ROOT` contains a runnable backend driver chain (script will auto-probe/rebuild `cheng` when possible).
+- The selected backend driver must support current `cheng-pebble` source set in `stage1` compile mode.
+
+The script performs:
+- backend driver bootstrap/rebuild (if `CHENG_LANG_ROOT/cheng` is missing or not runnable),
+- compile of `src/tooling/qa_production_main.cheng`,
+- execution of durability/restart checks with non-zero exit on failure.
+- on compile failure, prints the compiler diagnostic tail to help close remaining backend gaps.

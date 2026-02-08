@@ -2,11 +2,10 @@ module pebble_tooling_cli_core
 
 import std/tables as tables
 import std/strings as strings
-import std/std/strutils as strutils
+import std/strutils as strutils
 
 type
-    CliError =
-        of CatchableError
+    CliError = CatchableError
 
 type
     CliHandler = fn(ctx: CliContext, args: seq[str])
@@ -27,10 +26,11 @@ type
         aliases: seq[str]
 
 fn RaiseCliError(msg: str) =
-    raise newException(CliError, msg)
+    raise CliError(msg: msg)
 
 fn NewCliCommand(name: str, summary: str, handler: CliHandler = nil, details: str = ""): CliCommand =
-    var cmd: CliCommand = new[CliCommand]()
+    var cmd: CliCommand
+    new cmd
     if cmd != nil:
         cmd.name = name
         cmd.summary = summary
@@ -45,7 +45,7 @@ fn AddAlias(cmd: CliCommand, alias: str) =
     if cmd == nil:
         return
     if strings.len(alias) == 0:
-        raise newException(ValueError, "alias must be non-empty")
+        raise ValueError(msg: "alias must be non-empty")
     if alias == cmd.name:
         return
     var i: int32 = 0
@@ -59,7 +59,7 @@ fn AddSubcommand(parent: CliCommand, child: CliCommand) =
     if parent == nil || child == nil:
         return
     if tables.TableHas[CliCommand](parent.subcommands, child.name):
-        raise newException(ValueError, "duplicate command registration: " & child.name)
+        raise ValueError(msg: "duplicate command registration: " & child.name)
     tables.TablePut[CliCommand](parent.subcommands, child.name, child)
 
 fn FindSubcommand(parent: CliCommand, name: str): CliCommand =

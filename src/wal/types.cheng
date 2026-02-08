@@ -9,8 +9,7 @@ const
     chunkTypeCount = 13
 
 type
-    WalError =
-        of CatchableError
+    WalError = CatchableError
 
 type
     ChunkType = enum
@@ -49,37 +48,41 @@ type
         format: WireFormat
         headerSize: int32
 
-const
-    chunkFormatTable: array[chunkTypeCount, HeaderFormat] = [
-        HeaderFormat(position: ChunkPosInvalid, format: WireInvalid, headerSize: 0),
-        HeaderFormat(position: ChunkPosFull, format: WireLegacy, headerSize: legacyHeaderSize),
-        HeaderFormat(position: ChunkPosFirst, format: WireLegacy, headerSize: legacyHeaderSize),
-        HeaderFormat(position: ChunkPosMiddle, format: WireLegacy, headerSize: legacyHeaderSize),
-        HeaderFormat(position: ChunkPosLast, format: WireLegacy, headerSize: legacyHeaderSize),
-        HeaderFormat(position: ChunkPosFull, format: WireRecyclable, headerSize: recyclableHeaderSize),
-        HeaderFormat(position: ChunkPosFirst, format: WireRecyclable, headerSize: recyclableHeaderSize),
-        HeaderFormat(position: ChunkPosMiddle, format: WireRecyclable, headerSize: recyclableHeaderSize),
-        HeaderFormat(position: ChunkPosLast, format: WireRecyclable, headerSize: recyclableHeaderSize),
-        HeaderFormat(position: ChunkPosFull, format: WireWalSync, headerSize: walSyncHeaderSize),
-        HeaderFormat(position: ChunkPosFirst, format: WireWalSync, headerSize: walSyncHeaderSize),
-        HeaderFormat(position: ChunkPosMiddle, format: WireWalSync, headerSize: walSyncHeaderSize),
-        HeaderFormat(position: ChunkPosLast, format: WireWalSync, headerSize: walSyncHeaderSize)
-    ]
-
-fn headerIndex(typ: ChunkType): int32 =
-    return int32(typ)
-
 fn HeaderSize(typ: ChunkType): int32 =
-    return chunkFormatTable[headerIndex(typ)].headerSize
+    return HeaderFormatFor(typ).headerSize
 
 fn HeaderFormatFor(typ: ChunkType): HeaderFormat =
-    return chunkFormatTable[headerIndex(typ)]
+    if typ == ChunkFull:
+        return HeaderFormat(position: ChunkPosFull, format: WireLegacy, headerSize: legacyHeaderSize)
+    if typ == ChunkFirst:
+        return HeaderFormat(position: ChunkPosFirst, format: WireLegacy, headerSize: legacyHeaderSize)
+    if typ == ChunkMiddle:
+        return HeaderFormat(position: ChunkPosMiddle, format: WireLegacy, headerSize: legacyHeaderSize)
+    if typ == ChunkLast:
+        return HeaderFormat(position: ChunkPosLast, format: WireLegacy, headerSize: legacyHeaderSize)
+    if typ == ChunkRecyclableFull:
+        return HeaderFormat(position: ChunkPosFull, format: WireRecyclable, headerSize: recyclableHeaderSize)
+    if typ == ChunkRecyclableFirst:
+        return HeaderFormat(position: ChunkPosFirst, format: WireRecyclable, headerSize: recyclableHeaderSize)
+    if typ == ChunkRecyclableMiddle:
+        return HeaderFormat(position: ChunkPosMiddle, format: WireRecyclable, headerSize: recyclableHeaderSize)
+    if typ == ChunkRecyclableLast:
+        return HeaderFormat(position: ChunkPosLast, format: WireRecyclable, headerSize: recyclableHeaderSize)
+    if typ == ChunkWalSyncFull:
+        return HeaderFormat(position: ChunkPosFull, format: WireWalSync, headerSize: walSyncHeaderSize)
+    if typ == ChunkWalSyncFirst:
+        return HeaderFormat(position: ChunkPosFirst, format: WireWalSync, headerSize: walSyncHeaderSize)
+    if typ == ChunkWalSyncMiddle:
+        return HeaderFormat(position: ChunkPosMiddle, format: WireWalSync, headerSize: walSyncHeaderSize)
+    if typ == ChunkWalSyncLast:
+        return HeaderFormat(position: ChunkPosLast, format: WireWalSync, headerSize: walSyncHeaderSize)
+    return HeaderFormat(position: ChunkPosInvalid, format: WireInvalid, headerSize: 0)
 
 fn ChunkPositionOf(typ: ChunkType): ChunkPosition =
-    return chunkFormatTable[headerIndex(typ)].position
+    return HeaderFormatFor(typ).position
 
 fn WireFormatOf(typ: ChunkType): WireFormat =
-    return chunkFormatTable[headerIndex(typ)].format
+    return HeaderFormatFor(typ).format
 
 fn ChunkTypeFor(pos: ChunkPosition, format: WireFormat): ChunkType =
     if format == WireLegacy:

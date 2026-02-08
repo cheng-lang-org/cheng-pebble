@@ -67,7 +67,7 @@ fn collectMemEntries(mt: mem_types.MemTable,
             continue
         sortRecordsDesc(records)
         let currentKey = core_types.ToKey(key)
-        var currentBase = option.none(str)
+        var currentBase = option.None[str]()
         var operands: seq[str]
         var hasVisible: bool = false
         var doneForKey: bool = false
@@ -81,7 +81,7 @@ fn collectMemEntries(mt: mem_types.MemTable,
                 currentBase = option.some(rec.value)
                 doneForKey = true
             elif rec.kind == mem_types.MemValueDelete:
-                currentBase = option.none(str)
+                currentBase = option.None[str]()
                 doneForKey = true
             else:
                 operands.add(rec.value)
@@ -91,8 +91,7 @@ fn collectMemEntries(mt: mem_types.MemTable,
         var finalValue: option.Option[str]
         if operands.len > 0:
             if ! mem_types.HasMerge(mt.cfg):
-                raise newException(read_types.ReadError,
-                    "memtable merge operand without merge operator")
+                raise read_types.ReadError(msg: "memtable merge operand without merge operator")
             reverseStrings(operands)
             finalValue = mt.cfg.mergeOperator(currentKey, currentBase, operands)
         else:
@@ -111,7 +110,7 @@ fn BatchReadSource(batch: batch_module.BatchBase,
                    mergeOp: mem_types.MergeOperator = nil,
                    priority: int32 = DefaultBatchPriority): read_types.ReadSource =
     if batch == nil || batch.ops.len == 0:
-        return read_types.NewReadSource(@[], priority, read_types.ReadSourceBatch)
+        return read_types.NewReadSource(newSeq[read_types.ReadSourceEntry](), priority, read_types.ReadSourceBatch)
     var effectiveComp = comparator
     if effectiveComp == nil:
         effectiveComp = core_types.CompareBytewise
@@ -123,8 +122,7 @@ fn BatchReadSource(batch: batch_module.BatchBase,
             break
         i = i + 1
     if hasMerge && mergeOp == nil:
-        raise newException(read_types.ReadError,
-            "batch contains merge operations; merge operator required")
+        raise read_types.ReadError(msg: "batch contains merge operations; merge operator required")
     var cfg: mem_types.MemTableConfig
     cfg.comparator = effectiveComp
     cfg.mergeOperator = mergeOp
@@ -145,11 +143,15 @@ fn SstReadSource(reader: sstable_reader.TableReader,
                  priority: int32 = DefaultSSTPriority): read_types.ReadSource =
     var entries: seq[read_types.ReadSourceEntry]
     if reader != nil:
-        for entry in sstable_reader.Scan(reader):
+        let scanned = sstable_reader.Scan(reader)
+        var i: int32 = 0
+        while i < scanned.len:
+            let entry = scanned[i]
             entries.add(read_types.ReadSourceEntry(
                 key: entry.key,
                 value: option.some(entry.value)
             ))
+            i = i + 1
     return read_types.NewReadSource(entries, priority, read_types.ReadSourceSST)
 
 fn CustomReadSource(entries: seq[read_types.ReadSourceEntry],

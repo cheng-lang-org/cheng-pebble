@@ -1,5 +1,6 @@
 module pebble_tooling_sstable_commands
 
+import cheng/pebble/core/text as text
 import cheng/pebble/sstable/types as sstable_types
 import cheng/pebble/sstable/table_reader as table_reader
 import cheng/pebble/core/types as core_types
@@ -7,8 +8,9 @@ import cheng/pebble/tooling/cli_core as cli_core
 import std/bytes as bytes
 import std/option as option
 import std/strings as strings
-import std/std/strutils as strutils
+import std/strutils as strutils
 import std/os as os
+import std/system as sys
 
 
 type
@@ -20,15 +22,15 @@ type
 
 fn hexDigit(value: int32): char =
     if value < 10:
-        return chr(ord('0') + value)
-    return chr(ord('a') + value - 10)
+        return chr(int32('0') + value)
+    return chr(int32('a') + value - 10)
 
 fn StrToHex(text: str): str =
     var out: str = ""
     var i: int32 = 0
     let n: int32 = strings.len(text)
     while i < n:
-        let v: int32 = ord(text[i])
+        let v: int32 = int32(text[i])
         let hi = (v >> 4) & 0xF
         let lo = v & 0xF
         out = out + strings.charToStr(hexDigit(hi)) + strings.charToStr(hexDigit(lo))
@@ -47,7 +49,7 @@ fn ByteBufferToSeq(buf: bytes.ByteBuffer): seq[uint8] =
 fn readTable(path: str): table_reader.TableReader =
     let dataBuf = bytes.readFileBytes(path)
     if dataBuf.len <= 0:
-        raise newException(ValueError, "failed to read SSTable: " & path)
+        raise ValueError(msg: "failed to read SSTable: " & path)
     let seqData = ByteBufferToSeq(dataBuf)
     return table_reader.NewTableReader(seqData)
 
@@ -82,7 +84,7 @@ fn collectDigest(path: str): TableDigest =
 
 fn renderDigest(digest: TableDigest) =
     echo("File: " & digest.path)
-    echo("  Size: " & toString(digest.size) & " bytes")
+    echo("  Size: " & text.toText(digest.size) & " bytes")
     var counts: array[4, int32]
     var bytesByKind: array[4, int32]
     var i: int32 = 0
@@ -96,19 +98,19 @@ fn renderDigest(digest: TableDigest) =
     while k < 4:
         let kind = sstable_types.BlockKind(k)
         let label = kindLabel(kind)
-        echo("  " & label & " blocks: " & toString(counts[k]) &
-            " total bytes: " & toString(bytesByKind[k]))
+        echo("  " & label & " blocks: " & text.toText(counts[k]) &
+            " total bytes: " & text.toText(bytesByKind[k]))
         k = k + 1
     let props = digest.props
-    echo("  Entries: " & toString(props.numEntries))
-    echo("  Raw key bytes: " & toString(props.rawKeySize))
-    echo("  Raw value bytes: " & toString(props.rawValueSize))
+    echo("  Entries: " & text.toText(props.numEntries))
+    echo("  Raw key bytes: " & text.toText(props.rawKeySize))
+    echo("  Raw value bytes: " & text.toText(props.rawValueSize))
     if option.IsSome(props.smallestKey):
         echo("  Smallest key: " & core_types.ToBytes(option.Get(props.smallestKey)))
     if option.IsSome(props.largestKey):
         echo("  Largest key: " & core_types.ToBytes(option.Get(props.largestKey)))
     if option.IsSome(props.bloomBitsPerKey):
-        echo("  Bloom bits/key: " & toString(option.Get(props.bloomBitsPerKey)))
+        echo("  Bloom bits/key: " & text.toText(option.Get(props.bloomBitsPerKey)))
 
 fn handleLs(ctx: cli_core.CliContext, args: seq[str]) =
     ctx
@@ -158,13 +160,17 @@ fn handleDump(ctx: cli_core.CliContext, args: seq[str]) =
         let reader = readTable(path)
         echo("File: " & path)
         var count: int32 = 0
-        for kv in table_reader.Scan(reader):
+        let scanned = table_reader.Scan(reader)
+        var s: int32 = 0
+        while s < scanned.len:
+            let kv = scanned[s]
             let keyStr = formatKey(kv.key, hexMode)
             let valueStr = formatValue(kv.value, hexMode)
             echo("  " & keyStr & " : " & valueStr)
             count = count + 1
             if limit >= 0 && count >= limit:
                 break
+            s = s + 1
         if limit >= 0 && count >= limit:
             echo("  ...(truncated)")
         f = f + 1

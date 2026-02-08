@@ -10,7 +10,7 @@ const
     PrefixCompressedMagic = "\xffPC"
 
 type
-    BlockEntry =
+    BlockEntry = ref
         key: core_types.Key
         value: str
 
@@ -31,7 +31,7 @@ type
         prefixCompression: bool
 
 type
-    BlockItem =
+    BlockItem = ref
         key: core_types.Key
         value: str
 
@@ -44,31 +44,50 @@ type
         lastKey: str
 
 fn InitBlockBuilder(prefixCompression: bool = false): BlockBuilder =
-    return BlockBuilder(entries: @[], approxSize: 0, prefixCompression: prefixCompression)
+    return BlockBuilder(entries: newSeq[BlockEntry](), approxSize: 0, prefixCompression: prefixCompression)
+
+fn someBlockItem(value: BlockItem): option.Option[BlockItem] =
+    var out: option.Option[BlockItem]
+    out.has = true
+    out.value = value
+    return out
+
+fn takePrefix(text: str, count: int32): str =
+    if text == nil || count <= 0:
+        return ""
+    var limit = count
+    if limit > strings.len(text):
+        limit = strings.len(text)
+    var out: str = ""
+    var i: int32 = 0
+    while i < limit:
+        out = out + strings.charToStr(text[i])
+        i = i + 1
+    return out
 
 fn decodeLegacy(it: var BlockIterator): option.Option[BlockItem] =
     if it.pos >= it.data.len:
-        return option.none(BlockItem)
+        return option.None[BlockItem]()
     let keyBytes = enc.ReadBytes(it.data, &it.pos)
     let valueBytes = enc.ReadBytes(it.data, &it.pos)
-    return option.some(BlockItem(key: core_types.ToKey(keyBytes), value: valueBytes))
+    return someBlockItem(BlockItem(key: core_types.ToKey(keyBytes), value: valueBytes))
 
 fn decodePrefixCompressed(it: var BlockIterator): option.Option[BlockItem] =
     if it.remaining == 0:
-        return option.none(BlockItem)
+        return option.None[BlockItem]()
     it.remaining = it.remaining - 1
     let shared = int32(enc.DecodeVarint(it.data, &it.pos))
     if shared < 0 || shared > strings.len(it.lastKey):
-        raise newException(sstable_types.SSTError, "invalid shared prefix length")
+        raise sstable_types.SSTError(msg: "invalid shared prefix length")
     let suffix = enc.ReadBytes(it.data, &it.pos)
     let valueBytes = enc.ReadBytes(it.data, &it.pos)
     var keyBytes: str
     if shared == 0:
         keyBytes = suffix
     else:
-        keyBytes = it.lastKey[0..shared - 1] & suffix
+        keyBytes = takePrefix(it.lastKey, shared) & suffix
     it.lastKey = keyBytes
-    return option.some(BlockItem(key: core_types.ToKey(keyBytes), value: valueBytes))
+    return someBlockItem(BlockItem(key: core_types.ToKey(keyBytes), value: valueBytes))
 
 fn IsEmpty(builder: BlockBuilder): bool =
     return builder.entries.len == 0
@@ -98,7 +117,7 @@ fn encodePrefixCompressed(entries: seq[BlockEntry]): seq[uint8] =
         let keyLen: int32 = strings.len(keyBytes)
         var shared: int32 = 0
         while shared < lastLen && shared < keyLen &&
-            strings.charAt(lastKey, shared) == strings.charAt(keyBytes, shared):
+            lastKey[shared] == keyBytes[shared]:
             shared = shared + 1
         enc.AppendVarint(buffer, uint64(shared))
         let suffix = if shared >= keyLen: "" else: keyBytes[shared..keyLen - 1]
@@ -113,33 +132,36 @@ fn encodePrefixCompressed(entries: seq[BlockEntry]): seq[uint8] =
 
 fn Finish(builder: var BlockBuilder): BlockBuildResult =
     if builder.entries.len == 0:
-        raise newException(sstable_types.SSTError, "cannot finish empty block")
+        raise sstable_types.SSTError(msg: "cannot finish empty block")
+    let entries = builder.entries
     var result: BlockBuildResult
     if builder.prefixCompression:
-        result.payload = encodePrefixCompressed(builder.entries)
+        result.payload = encodePrefixCompressed(entries)
         result.encoding = sstable_types.BlockEncodingPrefixCompressed
     else:
         var buffer: seq[uint8]
         var i: int32 = 0
-        while i < builder.entries.len:
-            let entry = builder.entries[i]
+        while i < entries.len:
+            let entry = entries[i]
             enc.AppendBytes(buffer, core_types.ToBytes(entry.key))
             enc.AppendBytes(buffer, entry.value)
             i = i + 1
         result.payload = buffer
         result.encoding = sstable_types.BlockEncodingLegacy
-    result.firstKey = builder.entries[0].key
-    result.lastKey = builder.entries[builder.entries.len - 1].key
-    result.numEntries = builder.entries.len
+    let firstEntry = entries[0]
+    let lastEntry = entries[entries.len - 1]
+    result.firstKey = firstEntry.key
+    result.lastKey = lastEntry.key
+    result.numEntries = entries.len
     result.rawKeySize = 0
     result.rawValueSize = 0
     var j: int32 = 0
-    while j < builder.entries.len:
-        let entry = builder.entries[j]
+    while j < entries.len:
+        let entry = entries[j]
         result.rawKeySize = result.rawKeySize + strings.len(core_types.ToBytes(entry.key))
         result.rawValueSize = result.rawValueSize + strings.len(entry.value)
         j = j + 1
-    builder.entries.setLen(0)
+    builder.entries = newSeq[BlockEntry]()
     builder.approxSize = 0
     return result
 
@@ -149,7 +171,7 @@ fn InitBlockIterator(data: seq[uint8]): BlockIterator =
         var matched: bool = true
         var i: int32 = 0
         while i < magicLen:
-            let want = uint8(strings.charAt(PrefixCompressedMagic, i))
+            let want = uint8(PrefixCompressedMagic[i])
             if data[i] != want:
                 matched = false
                 break

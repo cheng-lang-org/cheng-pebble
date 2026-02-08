@@ -1,14 +1,16 @@
 module pebble_obs_manager
 
+import cheng/pebble/core/text as text
 import cheng/pebble/config/loader as config_loader
 import cheng/pebble/obs/events as obs_events
 import cheng/pebble/obs/metrics as obs_metrics
 import cheng/pebble/obs/ops as obs_ops
 import cheng/pebble/obs/profiling as obs_profiling
 import cheng/pebble/obs/types as obs_types
-import std/std/strutils as strutils
+import std/system as sys
+import std/strutils as strutils
 import std/strings as strings
-import std/std/times as times
+import std/times as times
 
 type
     ObservabilityOptions =
@@ -61,7 +63,7 @@ fn PublishEvent(obs: Observability,
     obs_events.Publish(obs.events, event)
     if obs.metrics != nil:
         obs_metrics.IncCounter(obs.metrics, "pebble_events_total",
-            "event counter", @[obs_types.LabelPair(name: "kind", value: toString(int32(kind)))])
+            "event counter", @[obs_types.LabelPair(name: "kind", value: text.toText(int32(kind)))])
 
 fn ExportPrometheus(obs: Observability): str =
     if obs == nil || obs.metrics == nil:
@@ -97,8 +99,8 @@ fn runEventsRecentCommand(ctx: CommandArgsContext): str =
     var i: int32 = 0
     while i < recent.len:
         let event = recent[i]
-        let line = toString(event.timestamp.unix) &
-            " " & toString(int32(event.kind)) & " " & event.message
+        let line = text.toText(event.timestamp.unix) &
+            " " & text.toText(int32(event.kind)) & " " & event.message
         lines.add(line)
         i = i + 1
     return strutils.join(lines, "\n")
@@ -188,7 +190,8 @@ fn NewObservability(options: ObservabilityOptions): Observability =
             labelNames: @["scenario", "result"],
             unit: ""
         ))
-    var obs: Observability = new[Observability]()
+    var obs: Observability
+    new obs
     if obs != nil:
         obs.metrics = metrics
         obs.events = events

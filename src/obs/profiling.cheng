@@ -1,9 +1,11 @@
 module pebble_obs_profiling
 
+import cheng/pebble/core/text as text
 import cheng/pebble/obs/events as obs_events
 import cheng/pebble/obs/metrics as obs_metrics
 import cheng/pebble/obs/types as obs_types
-import std/std/times as times
+import std/system as sys
+import std/times as times
 import std/strings as strings
 
 
@@ -15,7 +17,8 @@ type
         sinks: seq[ProfilingSink]
 
 fn NewProfiler(): Profiler =
-    var profiler: Profiler = new[Profiler]()
+    var profiler: Profiler
+    new profiler
     if profiler != nil:
         profiler.enabled = true
         profiler.sinks = @[]
@@ -59,7 +62,7 @@ fn ProfileBlock(profiler: Profiler,
             timestamp: times.now(),
             message: msg,
             tags: obs_types.NewLabelPairs(labels),
-            payload: "duration_seconds=" & toString(elapsed)
+            payload: "duration_seconds=" & text.toText(elapsed)
         )
         obs_events.Publish(bus, event)
     notifySinks(profiler, name, elapsed)

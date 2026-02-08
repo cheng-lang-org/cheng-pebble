@@ -9,8 +9,7 @@ const
     entryOverhead = 16
 
 type
-    MemError =
-        of CatchableError
+    MemError = CatchableError
 
 type
     MergeOperator = fn(key: core_types.Key,
@@ -150,7 +149,7 @@ fn ResourceKindFromString(value: str): resource.ResourceKind =
         return resource.ResFileHandles
     if value == "resCompactionTokens" || value == "ResCompactionTokens":
         return resource.ResCompactionTokens
-    raise newException(ValueError, "unknown resource kind: " & value)
+    raise ValueError(msg: "unknown resource kind: " & value)
 
 fn MemValueKindToString(kind: MemValueKind): str =
     if kind == MemValueSet:
@@ -168,4 +167,4 @@ fn MemValueKindFromString(value: str): MemValueKind =
         return MemValueDelete
     if value == "merge" || value == "memValueMerge" || value == "MemValueMerge":
         return MemValueMerge
-    raise newException(ValueError, "unknown mem value kind: " & value)
+    raise ValueError(msg: "unknown mem value kind: " & value)

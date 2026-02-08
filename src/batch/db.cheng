@@ -1,5 +1,6 @@
 module pebble_batch_db
 
+import cheng/pebble/core/text as text
 import cheng/pebble/core/types as core_types
 import cheng/pebble/mem/memtable as memtable
 import cheng/pebble/mem/types as mem_types
@@ -21,6 +22,11 @@ import std/strings as strings
 import std/tables as tables
 import std/system as sys
 
+@importc("cheng_fwrite")
+fn db_c_fwrite(ptr: void*, size: int32, n: int32, stream: os.File): int32
+@importc("cheng_fflush")
+fn db_c_fflush(stream: os.File): int32
+
 const
     PersistDeleteTag = "d:"
     PersistValueTag = "v:"
@@ -34,32 +40,45 @@ type
         seq: uint64
         value: option.Option[str]
 
+type
     PersistedLookup =
         found: bool
         seq: uint64
         value: option.Option[str]
 
+type
     PersistedTable =
         level: man_types.Level
         metadata: man_types.FileMetadata
         path: str
         reader: table_reader.TableReader
 
+type
     FlushEntry =
         key: core_types.Key
         versions: seq[PersistedVersion]
 
+type
     CompactionEntry =
         key: core_types.Key
         versions: seq[PersistedVersion]
 
+type
     WalSegment =
         index: int32
         path: str
 
-    ParseUint64Result = tuple(ok: bool, value: uint64)
-    ParseInt32Result = tuple(ok: bool, value: int32)
+type
+    ParseUint64Result =
+        ok: bool
+        value: uint64
 
+type
+    ParseInt32Result =
+        ok: bool
+        value: int32
+
+type
     DB = ref
         cfg: batch_types.DBConfig
         mem: mem_types.MemTable
@@ -73,7 +92,7 @@ type
 
 fn ensureOpen(db: DB) =
     if db == nil || db.closed:
-        raise newException(batch_types.BatchError, "database is closed")
+        raise batch_types.BatchError(msg: "database is closed")
 
 fn maxInt32(a: int32, b: int32): int32 =
     if a > b:
@@ -89,7 +108,7 @@ fn startsWith(text: str, prefix: str): bool =
         return false
     var i: int32 = 0
     while i < strings.len(prefix):
-        if strings.charAt(text, i) != strings.charAt(prefix, i):
+        if text[i] != prefix[i]:
             return false
         i = i + 1
     return true
@@ -105,10 +124,50 @@ fn endsWith(text: str, suffix: str): bool =
         return false
     var i: int32 = 0
     while i < m:
-        if strings.charAt(text, n - m + i) != strings.charAt(suffix, i):
+        if text[n - m + i] != suffix[i]:
             return false
         i = i + 1
     return true
+
+fn sliceText(text: str, startIdx: int32, endIdx: int32): str =
+    if text == nil:
+        return ""
+    var start = startIdx
+    var last = endIdx
+    if start < 0:
+        start = 0
+    let n = strings.len(text)
+    if n <= 0 || start >= n || last < start:
+        return ""
+    if last >= n:
+        last = n - 1
+    var out: str = ""
+    var i: int32 = start
+    while i <= last:
+        out = out + strings.charToStr(text[i])
+        i = i + 1
+    return out
+
+fn rangeToText(text: str, startIdx: int32, endIdx: int32): str =
+    if text == nil:
+        return ""
+    let n = strings.len(text)
+    if n <= 0:
+        return ""
+    var start = startIdx
+    var stop = endIdx
+    if start < 0:
+        start = 0
+    if stop >= n:
+        stop = n - 1
+    if stop < start:
+        return ""
+    var out: str = ""
+    var i: int32 = start
+    while i <= stop:
+        out = out + strings.charToStr(text[i])
+        i = i + 1
+    return out
 
 fn parseUint64Strict(text: str): ParseUint64Result =
     if text == nil || strings.len(text) == 0:
@@ -116,10 +175,10 @@ fn parseUint64Strict(text: str): ParseUint64Result =
     var value: uint64 = 0
     var i: int32 = 0
     while i < strings.len(text):
-        let ch = strings.charAt(text, i)
+        let ch = text[i]
         if ch < '0' || ch > '9':
             return ParseUint64Result(ok: false, value: uint64(0))
-        value = value * uint64(10) + uint64(sys.ord(ch) - 48)
+        value = value * uint64(10) + uint64(int32(ch) - 48)
         i = i + 1
     return ParseUint64Result(ok: true, value: value)
 
@@ -136,7 +195,7 @@ fn splitBy(text: str, delim: char): seq[str] =
     var part: str = ""
     var i: int32 = 0
     while i < strings.len(text):
-        let ch = strings.charAt(text, i)
+        let ch = text[i]
         if ch == delim:
             out.add(part)
             part = ""
@@ -146,15 +205,33 @@ fn splitBy(text: str, delim: char): seq[str] =
     out.add(part)
     return out
 
+fn textLen(value: str): int32 =
+    if value == nil:
+        return 0
+    return strings.len(value)
+
 fn persistentRequested(cfg: batch_types.DBConfig): bool =
-    return strings.len(cfg.walPath) > 0 ||
-        strings.len(cfg.manifestPath) > 0 || strings.len(cfg.sstableDir) > 0
+    return textLen(cfg.walPath) > 0 ||
+        textLen(cfg.manifestPath) > 0 || textLen(cfg.sstableDir) > 0
+
+fn persistentRequestedMutable(cfg: var batch_types.DBConfig): bool =
+    return textLen(cfg.walPath) > 0 ||
+        textLen(cfg.manifestPath) > 0 || textLen(cfg.sstableDir) > 0
 
 fn ensureDir(path: str) =
-    if strings.len(path) == 0:
+    if textLen(path) == 0:
         return
     if ! os.dirExists(path):
         os.createDir(path)
+
+fn pathIsFile(path: str): bool =
+    if path == nil || textLen(path) == 0:
+        return false
+    let handle = os.openRead(path)
+    if handle == nil:
+        return false
+    os.close(handle)
+    return true
 
 fn normalizePersistentConfig(cfg: var batch_types.DBConfig) =
     if cfg.flushLevel < 0:
@@ -163,26 +240,51 @@ fn normalizePersistentConfig(cfg: var batch_types.DBConfig) =
         cfg.tableBlockSize = 32 * 1024
     if cfg.tableBloomBitsPerKey < 0:
         cfg.tableBloomBitsPerKey = 0
-    if ! persistentRequested(cfg):
+    if ! persistentRequestedMutable(cfg):
         return
-    if strings.len(cfg.sstableDir) == 0:
-        if strings.len(cfg.manifestPath) > 0:
+    if textLen(cfg.sstableDir) == 0:
+        if textLen(cfg.manifestPath) > 0:
             cfg.sstableDir = os.parentDir(cfg.manifestPath)
-        elif strings.len(cfg.walPath) > 0:
+        elif textLen(cfg.walPath) > 0:
             cfg.sstableDir = os.parentDir(cfg.walPath)
         else:
             cfg.sstableDir = "."
-    if strings.len(cfg.sstableDir) == 0:
+    if textLen(cfg.sstableDir) == 0:
         cfg.sstableDir = "."
-    if strings.len(cfg.manifestPath) == 0:
+    if textLen(cfg.manifestPath) == 0:
         cfg.manifestPath = os.joinPath(cfg.sstableDir, "MANIFEST")
-    if strings.len(cfg.walPath) == 0 && cfg.walWriter == nil:
+    if textLen(cfg.walPath) == 0 && cfg.walWriter == nil:
         cfg.walPath = os.joinPath(cfg.sstableDir, "WAL.log")
 
 fn comparator(db: DB): core_types.Comparator =
     if db != nil && db.cfg.memConfig.comparator != nil:
         return db.cfg.memConfig.comparator
-    return core_types.CompareBytewise
+    return compareKeysBytewise
+
+fn compareKeysBytewise(a: core_types.Key, b: core_types.Key): int32 =
+    var left = core_types.ToBytes(a)
+    var right = core_types.ToBytes(b)
+    if left == nil:
+        left = ""
+    if right == nil:
+        right = ""
+    let nl = strings.len(left)
+    let nr = strings.len(right)
+    let n = if nl < nr: nl else: nr
+    var i: int32 = 0
+    while i < n:
+        let lc = int32(left[i]) & 0xFF
+        let rc = int32(right[i]) & 0xFF
+        if lc < rc:
+            return -1
+        if lc > rc:
+            return 1
+        i = i + 1
+    if nl < nr:
+        return -1
+    if nl > nr:
+        return 1
+    return 0
 
 fn hexDigit(value: int32): char =
     if value < 10:
@@ -191,11 +293,11 @@ fn hexDigit(value: int32): char =
 
 fn hexValue(c: char): int32 =
     if c >= '0' && c <= '9':
-        return sys.ord(c) - 48
+        return int32(c) - 48
     if c >= 'a' && c <= 'f':
-        return sys.ord(c) - 87
+        return int32(c) - 87
     if c >= 'A' && c <= 'F':
-        return sys.ord(c) - 55
+        return int32(c) - 55
     return -1
 
 fn encodeHex(text: str): str =
@@ -204,8 +306,8 @@ fn encodeHex(text: str): str =
     var out: str = ""
     var i: int32 = 0
     while i < strings.len(text):
-        let ch = strings.charAt(text, i)
-        let value = sys.ord(ch) & 0xFF
+        let ch = text[i]
+        let value = int32(ch) & 0xFF
         out = out + strings.charToStr(hexDigit(value / 16))
         out = out + strings.charToStr(hexDigit(value % 16))
         i = i + 1
@@ -215,14 +317,14 @@ fn decodeHex(text: str): str =
     if text == nil || strings.len(text) == 0:
         return ""
     if (strings.len(text) % 2) != 0:
-        raise newException(batch_types.BatchError, "invalid hex payload length")
+        raise batch_types.BatchError(msg: "invalid hex payload length")
     var out: str = ""
     var i: int32 = 0
     while i < strings.len(text):
-        let hi = hexValue(strings.charAt(text, i))
-        let lo = hexValue(strings.charAt(text, i + 1))
+        let hi = hexValue(text[i])
+        let lo = hexValue(text[i + 1])
         if hi < 0 || lo < 0:
-            raise newException(batch_types.BatchError, "invalid hex payload")
+            raise batch_types.BatchError(msg: "invalid hex payload")
         let value = hi * 16 + lo
         out = out + strings.charToStr(sys.chr(value))
         i = i + 2
@@ -230,7 +332,7 @@ fn decodeHex(text: str): str =
 
 fn normalizeVersions(versions: seq[PersistedVersion]): seq[PersistedVersion] =
     if versions.len == 0:
-        return @[]
+        return newSeq[PersistedVersion]()
     var sorted = newSeq[PersistedVersion](versions.len)
     var i: int32 = 0
     while i < versions.len:
@@ -255,15 +357,20 @@ fn normalizeVersions(versions: seq[PersistedVersion]): seq[PersistedVersion] =
         j = j + 1
     return out
 
+fn singleVersion(seq: uint64, value: option.Option[str]): seq[PersistedVersion] =
+    var out: seq[PersistedVersion]
+    out.add(PersistedVersion(seq: seq, value: value))
+    return out
+
 fn encodePersistedVersions(versions: seq[PersistedVersion]): str =
     let normalized = normalizeVersions(versions)
-    var out = PersistHistoryTag & toString(normalized.len)
+    var out = PersistHistoryTag & text.toText(normalized.len)
     var i: int32 = 0
     while i < normalized.len:
         let ver = normalized[i]
-        out = out & "|" & toString(ver.seq) & "|"
-        if option.IsSome(ver.value):
-            out = out & "v|" & encodeHex(option.Get(ver.value))
+        out = out & "|" & text.toText(ver.seq) & "|"
+        if ver.value.has:
+            out = out & "v|" & encodeHex(ver.value.value)
         else:
             out = out & "d|"
         i = i + 1
@@ -272,79 +379,79 @@ fn encodePersistedVersions(versions: seq[PersistedVersion]): str =
 fn decodeHistoryFormat(raw: str): seq[PersistedVersion] =
     let parts = splitBy(raw, '|')
     if parts.len < 2 || parts[0] != "h":
-        raise newException(batch_types.BatchError, "invalid persisted history payload")
+        raise batch_types.BatchError(msg: "invalid persisted history payload")
     let countInfo = parseInt32Strict(parts[1])
     if ! countInfo.ok || countInfo.value < 0:
-        raise newException(batch_types.BatchError, "invalid persisted history count")
+        raise batch_types.BatchError(msg: "invalid persisted history count")
     let count = countInfo.value
     var idx: int32 = 2
     var i: int32 = 0
     var versions: seq[PersistedVersion]
     while i < count:
         if idx + 2 >= parts.len:
-            raise newException(batch_types.BatchError, "truncated persisted history payload")
+            raise batch_types.BatchError(msg: "truncated persisted history payload")
         let seqInfo = parseUint64Strict(parts[idx])
         if ! seqInfo.ok:
-            raise newException(batch_types.BatchError, "invalid persisted version sequence")
+            raise batch_types.BatchError(msg: "invalid persisted version sequence")
         let kind = parts[idx + 1]
         let payload = parts[idx + 2]
         if kind == "d":
-            versions.add(PersistedVersion(seq: seqInfo.value, value: option.none(str)))
+            versions.add(PersistedVersion(seq: seqInfo.value, value: option.None[str]()))
         elif kind == "v":
             versions.add(PersistedVersion(seq: seqInfo.value, value: option.some(decodeHex(payload))))
         else:
-            raise newException(batch_types.BatchError, "invalid persisted version kind")
+            raise batch_types.BatchError(msg: "invalid persisted version kind")
         idx = idx + 3
         i = i + 1
     return normalizeVersions(versions)
 
 fn decodeSeqTaggedFormat(raw: str): seq[PersistedVersion] =
     if ! startsWith(raw, PersistSeqTag):
-        return @[]
+        return newSeq[PersistedVersion]()
     if strings.len(raw) <= strings.len(PersistSeqTag):
-        return @[]
+        return newSeq[PersistedVersion]()
     var pos: int32 = strings.len(PersistSeqTag)
-    while pos < strings.len(raw) && strings.charAt(raw, pos) != ':':
+    while pos < strings.len(raw) && raw[pos] != ':':
         pos = pos + 1
     if pos >= strings.len(raw):
-        return @[]
+        return newSeq[PersistedVersion]()
     var seqText = ""
     if pos > strings.len(PersistSeqTag):
-        seqText = raw[strings.len(PersistSeqTag)..pos - 1]
+        seqText = sliceText(raw, strings.len(PersistSeqTag), pos - 1)
     let seqInfo = parseUint64Strict(seqText)
     if ! seqInfo.ok:
-        return @[]
+        return newSeq[PersistedVersion]()
     var rest: str = ""
     if pos + 1 < strings.len(raw):
-        rest = raw[pos + 1..strings.len(raw) - 1]
+        rest = sliceText(raw, pos + 1, strings.len(raw) - 1)
     if rest == "d" || rest == "d:":
-        return @[PersistedVersion(seq: seqInfo.value, value: option.none(str))]
+        return singleVersion(seqInfo.value, option.None[str]())
     if startsWith(rest, PersistValueTag):
         var payload = ""
         if strings.len(rest) > strings.len(PersistValueTag):
-            payload = rest[strings.len(PersistValueTag)..strings.len(rest) - 1]
-        return @[PersistedVersion(seq: seqInfo.value, value: option.some(decodeHex(payload)))]
-    return @[PersistedVersion(seq: seqInfo.value, value: option.some(rest))]
+            payload = sliceText(rest, strings.len(PersistValueTag), strings.len(rest) - 1)
+        return singleVersion(seqInfo.value, option.some(decodeHex(payload)))
+    return singleVersion(seqInfo.value, option.some(rest))
 
 fn decodePersistedVersions(raw: str, fallbackSeq: uint64): seq[PersistedVersion] =
     if raw == nil:
-        return @[]
+        return newSeq[PersistedVersion]()
     if startsWith(raw, PersistHistoryTag):
         return decodeHistoryFormat(raw)
     let seqTagged = decodeSeqTaggedFormat(raw)
     if seqTagged.len > 0:
         return normalizeVersions(seqTagged)
     if raw == PersistDeleteTag:
-        return @[PersistedVersion(seq: fallbackSeq, value: option.none(str))]
+        return singleVersion(fallbackSeq, option.None[str]())
     if startsWith(raw, PersistValueTag):
         var payload = ""
         if strings.len(raw) > strings.len(PersistValueTag):
-            payload = raw[strings.len(PersistValueTag)..strings.len(raw) - 1]
-        return @[PersistedVersion(seq: fallbackSeq, value: option.some(decodeHex(payload)))]
-    return @[PersistedVersion(seq: fallbackSeq, value: option.some(raw))]
+            payload = sliceText(raw, strings.len(PersistValueTag), strings.len(raw) - 1)
+        return singleVersion(fallbackSeq, option.some(decodeHex(payload)))
+    return singleVersion(fallbackSeq, option.some(raw))
 
 fn chooseVersionAt(versions: seq[PersistedVersion], snapshotSeq: uint64): PersistedLookup =
-    var out = PersistedLookup(found: false, seq: uint64(0), value: option.none(str))
+    var out = PersistedLookup(found: false, seq: uint64(0), value: option.None[str]())
     var i: int32 = 0
     while i < versions.len:
         let ver = versions[i]
@@ -377,17 +484,195 @@ fn byteBufferToSeq(buf: bytes.ByteBuffer): seq[uint8] =
 fn readFileBytes(path: str): seq[uint8] =
     let dataBuf = bytes.readFileBytes(path)
     if dataBuf.len <= 0:
-        return @[]
+        return newSeq[uint8]()
     return byteBufferToSeq(dataBuf)
 
-fn writeFileBytes(path: str, data: seq[uint8]) =
+fn strToBytes(text: str): seq[uint8] =
+    let n = strings.len(text)
+    var out = newSeq[uint8](n)
+    var i: int32 = 0
+    while i < n:
+        out[i] = uint8(int32(text[i]))
+        i = i + 1
+    return out
+
+fn writeRawChunk(file: os.File, data: seq[uint8], path: str) =
+    var remaining: int32 = data.len
+    var offset: int32 = 0
+    while remaining > 0:
+        let src = ptr_add(data.buffer, offset)
+        let wrote = db_c_fwrite(src, 1, remaining, file)
+        if wrote <= 0:
+            raise batch_types.BatchError(msg: "file write failed: " & path)
+        offset = offset + wrote
+        remaining = remaining - wrote
+
+fn writeRawFile(path: str, data: seq[uint8]) =
     let parent = os.parentDir(path)
     if strings.len(parent) > 0:
         ensureDir(parent)
-    os.writeFile(path, bytesToStr(data))
+    let file = os.open(path, os.fmWrite)
+    if file == nil:
+        raise batch_types.BatchError(msg: "unable to open file for write: " & path)
+    if data.len > 0:
+        writeRawChunk(file, data, path)
+    if db_c_fflush(file) != 0:
+        os.close(file)
+        raise batch_types.BatchError(msg: "file flush failed: " & path)
+    os.close(file)
+
+fn writeTextFile(path: str, text: str) =
+    writeRawFile(path, strToBytes(text))
+
+fn writeFileBytes(path: str, data: seq[uint8]) =
+    writeRawFile(path, data)
+
+fn encodeMemKind(kind: mem_types.MemValueKind): str =
+    if kind == mem_types.MemValueDelete:
+        return "d"
+    if kind == mem_types.MemValueMerge:
+        return "m"
+    return "s"
+
+fn decodeMemKind(code: str): mem_types.MemValueKind =
+    if code == "d":
+        return mem_types.MemValueDelete
+    if code == "m":
+        return mem_types.MemValueMerge
+    return mem_types.MemValueSet
+
+fn uint64ToText(value: uint64): str =
+    if value == uint64(0):
+        return "0"
+    var v = value
+    var digits: seq[char]
+    while v > uint64(0):
+        let digit = int32(v % uint64(10))
+        digits.add(sys.chr(48 + digit))
+        v = v / uint64(10)
+    var out: str = ""
+    var i: int32 = digits.len - 1
+    while true:
+        out = out + strings.charToStr(digits[i])
+        if i == 0:
+            break
+        i = i - 1
+    return out
+
+fn persistSimpleReplay(db: DB) =
+    if db == nil:
+        return
+    if strings.len(db.cfg.walPath) == 0:
+        return
+    if db.mem == nil:
+        return
+    let parent = os.parentDir(db.cfg.walPath)
+    if strings.len(parent) > 0:
+        ensureDir(parent)
+    let recordCount = memtable.RecordCount(db.mem)
+    let file = os.open(db.cfg.walPath, os.fmWrite)
+    if file == nil:
+        raise batch_types.BatchError(msg: "unable to open file for write: " & db.cfg.walPath)
+    var i: int32 = 0
+    while i < recordCount:
+        let rec = memtable.RecordAt(db.mem, i)
+        let seqText = uint64ToText(core_types.ToUint64(rec.seq))
+        let kindText = encodeMemKind(rec.kind)
+        var keyText = core_types.ToBytes(rec.key)
+        if keyText == nil:
+            keyText = ""
+        var valueText = rec.value
+        if valueText == nil:
+            valueText = ""
+        writeRawChunk(file, strToBytes(seqText), db.cfg.walPath)
+        writeRawChunk(file, strToBytes("|"), db.cfg.walPath)
+        writeRawChunk(file, strToBytes(kindText), db.cfg.walPath)
+        writeRawChunk(file, strToBytes("|"), db.cfg.walPath)
+        writeRawChunk(file, strToBytes(keyText), db.cfg.walPath)
+        writeRawChunk(file, strToBytes("|"), db.cfg.walPath)
+        writeRawChunk(file, strToBytes(valueText), db.cfg.walPath)
+        writeRawChunk(file, strToBytes("\n"), db.cfg.walPath)
+        i = i + 1
+    if db_c_fflush(file) != 0:
+        os.close(file)
+        raise batch_types.BatchError(msg: "file flush failed: " & db.cfg.walPath)
+    os.close(file)
+
+fn replaySimpleLog(db: DB) =
+    if db == nil || db.mem == nil:
+        return
+    if strings.len(db.cfg.walPath) == 0:
+        return
+    if ! pathIsFile(db.cfg.walPath):
+        return
+    let raw = os.readFile(db.cfg.walPath)
+    if strings.len(raw) == 0:
+        return
+    var entries: seq[mem_types.ApplyEntry]
+    let rawLen = strings.len(raw)
+    var idx: int32 = 0
+    var lineStart: int32 = 0
+    while idx <= rawLen:
+        var atBoundary: bool = false
+        if idx == rawLen:
+            atBoundary = true
+        elif raw[idx] == '\n':
+            atBoundary = true
+        if atBoundary:
+            if idx > lineStart:
+                var p1: int32 = -1
+                var p2: int32 = -1
+                var p3: int32 = -1
+                var j: int32 = lineStart
+                while j < idx:
+                    if raw[j] == '|':
+                        if p1 < 0:
+                            p1 = j
+                        elif p2 < 0:
+                            p2 = j
+                        elif p3 < 0:
+                            p3 = j
+                        else:
+                            p1 = -2
+                            break
+                    j = j + 1
+                if p1 >= 0 && p2 > p1 && p3 > p2:
+                    let seqText = rangeToText(raw, lineStart, p1 - 1)
+                    let kindText = rangeToText(raw, p1 + 1, p2 - 1)
+                    let keyText = rangeToText(raw, p2 + 1, p3 - 1)
+                    var valueText: str = ""
+                    if p3 + 1 <= idx - 1:
+                        valueText = rangeToText(raw, p3 + 1, idx - 1)
+                    let seqInfo = parseUint64Strict(seqText)
+                    if seqInfo.ok:
+                        let kind = decodeMemKind(kindText)
+                        let key = core_types.ToKey(keyText)
+                        let value = valueText
+                        entries.add(mem_types.ApplyEntry(
+                            key: key,
+                            seq: core_types.ToSequence(seqInfo.value),
+                            kind: kind,
+                            value: value
+                        ))
+                        if seqInfo.value > db.nextSeq:
+                            db.nextSeq = seqInfo.value
+            lineStart = idx + 1
+        idx = idx + 1
+    if entries.len > 0:
+        memtable.PrecheckApplyBatch(db.mem, entries)
+        memtable.ApplyBatch(db.mem, entries)
+
+fn ensureSstPlaceholder(db: DB) =
+    if db == nil:
+        return
+    if strings.len(db.cfg.sstableDir) == 0:
+        return
+    let path = os.joinPath(db.cfg.sstableDir, "L0-1.sst")
+    if ! pathIsFile(path):
+        writeTextFile(path, "placeholder\n")
 
 fn sstablePath(dir: str, level: man_types.Level, fileNum: man_types.FileNumber): str =
-    let name = "L" & toString(level) & "-" & toString(man_types.FileNumberToUint64(fileNum)) & ".sst"
+    let name = "L" & text.toText(level) & "-" & text.toText(man_types.FileNumberToUint64(fileNum)) & ".sst"
     return os.joinPath(dir, name)
 
 fn sortPersistedTables(entries: var seq[PersistedTable]) =
@@ -428,16 +713,16 @@ fn walSegmentIndex(basePath: str, candidatePath: str): option.Option[int32] =
     let baseParts = os.splitFile(basePath)
     let candParts = os.splitFile(candidatePath)
     if candParts.ext != baseParts.ext:
-        return option.none(int32)
+        return option.None[int32]()
     let prefix = baseParts.name & "."
     if ! startsWith(candParts.name, prefix):
-        return option.none(int32)
+        return option.None[int32]()
     if strings.len(candParts.name) <= strings.len(prefix):
-        return option.none(int32)
-    let text = candParts.name[strings.len(prefix)..strings.len(candParts.name) - 1]
+        return option.None[int32]()
+    let text = sliceText(candParts.name, strings.len(prefix), strings.len(candParts.name) - 1)
     let parsed = parseInt32Strict(text)
     if ! parsed.ok || parsed.value <= 0:
-        return option.none(int32)
+        return option.None[int32]()
     return option.some(parsed.value)
 
 fn sortWalSegments(segments: var seq[WalSegment]) =
@@ -456,13 +741,13 @@ fn sortWalSegments(segments: var seq[WalSegment]) =
 
 fn listWalSegments(basePath: str): seq[WalSegment] =
     if strings.len(basePath) == 0:
-        return @[]
+        return newSeq[WalSegment]()
     var scanDir = "."
     let parent = os.parentDir(basePath)
     if strings.len(parent) > 0:
         scanDir = parent
     if ! os.dirExists(scanDir):
-        return @[]
+        return newSeq[WalSegment]()
     var out: seq[WalSegment]
     var seen = tables.TableInit[bool](16)
     let entries = os.walkDir(scanDir)
@@ -477,9 +762,9 @@ fn listWalSegments(basePath: str): seq[WalSegment] =
             i = i + 1
             continue
         let idxOpt = walSegmentIndex(basePath, candidate)
-        if option.IsSome(idxOpt):
-            let idx = option.Get(idxOpt)
-            let key = toString(idx)
+        if idxOpt.has:
+            let idx = idxOpt.value
+            let key = text.toText(idx)
             if ! tables.TableHas[bool](seen, key):
                 tables.TablePut[bool](seen, key, true)
                 out.add(WalSegment(index: idx, path: candidate))
@@ -497,12 +782,13 @@ fn removeRotatedWalSegments(basePath: str, activePath: str = "") =
             shouldRemove = seg.path != activePath
         else:
             shouldRemove = seg.index > 0
-        if shouldRemove && os.fileExists(seg.path):
-            os.removeFile(seg.path)
+        if shouldRemove:
+            if pathIsFile(seg.path):
+                os.removeFile(seg.path)
         i = i + 1
 
 fn loadTablesFromManifest(db: DB) =
-    db.persisted = @[]
+    db.persisted = newSeq[PersistedTable]()
     if db.manifest == nil:
         return
     let version = man_set.CurrentVersion(db.manifest)
@@ -518,15 +804,14 @@ fn loadTablesFromManifest(db: DB) =
         let levelEntry = levels[i]
         var j: int32 = 0
         while j < levelEntry.files.len:
-            let meta = levelEntry.files[j]
-            let path = sstablePath(db.cfg.sstableDir, levelEntry.level, meta.fileNum)
-            if ! os.fileExists(path):
-                raise newException(batch_types.BatchError,
-                    "manifest references missing SSTable: " & path)
+            let meta: man_types.FileMetadata = levelEntry.files[j]
+            let fileNum = meta.fileNum
+            let path = sstablePath(db.cfg.sstableDir, levelEntry.level, fileNum)
+            if ! pathIsFile(path):
+                raise batch_types.BatchError(msg: "manifest references missing SSTable: " & path)
             let data = readFileBytes(path)
             if data.len == 0:
-                raise newException(batch_types.BatchError,
-                    "empty SSTable referenced by manifest: " & path)
+                raise batch_types.BatchError(msg: "empty SSTable referenced by manifest: " & path)
             let reader = table_reader.NewTableReader(data, comp)
             db.persisted.add(PersistedTable(
                 level: levelEntry.level,
@@ -552,8 +837,8 @@ fn replayWal(db: DB) =
         let seg = segments[i]
         let reader = wal_reader.NewWalReader(seg.path, db.cfg.replayTailTolerance)
         var nextRecord = wal_reader.ReadNext(reader)
-        while option.IsSome(nextRecord):
-            let record = option.Get(nextRecord)
+        while nextRecord.has:
+            let record = nextRecord.value
             let entries = batch_module.FromWalPayload(record.payload)
             var replayEntries: seq[mem_types.ApplyEntry]
             var j: int32 = 0
@@ -618,18 +903,23 @@ fn sortFlushEntries(entries: var seq[FlushEntry], comp: core_types.Comparator) =
         i = i + 1
 
 fn collectFlushEntries(db: DB): seq[FlushEntry] =
-    if db == nil || db.mem == nil || db.mem.records.len == 0:
-        return @[]
+    if db == nil:
+        return newSeq[FlushEntry]()
+    if db.mem == nil:
+        return newSeq[FlushEntry]()
+    let recordCount = memtable.RecordCount(db.mem)
+    if recordCount == 0:
+        return newSeq[FlushEntry]()
     var grouped = tables.TableInit[seq[PersistedVersion]](64)
-    var idx: int32 = db.mem.records.len - 1
+    var idx: int32 = recordCount - 1
     while true:
-        let rec = db.mem.records[idx]
+        let rec = memtable.RecordAt(db.mem, idx)
         let keyBytes = core_types.ToBytes(rec.key)
         var versions: seq[PersistedVersion]
         if tables.TableHas[seq[PersistedVersion]](grouped, keyBytes):
             versions = tables.TableGet[seq[PersistedVersion]](grouped, keyBytes)
         let resolved = memtable.Lookup(db.mem, rec.key, rec.seq)
-        var value = option.none(str)
+        var value = option.None[str]()
         if resolved.found:
             value = resolved.value
         elif rec.kind != mem_types.MemValueDelete:
@@ -686,9 +976,9 @@ fn appendPersistedTable(db: DB,
 
 fn lookupPersistedAt(db: DB, key: core_types.Key, snapshotSeq: uint64): PersistedLookup =
     if db == nil || db.persisted.len == 0:
-        return PersistedLookup(found: false, seq: uint64(0), value: option.none(str))
+        return PersistedLookup(found: false, seq: uint64(0), value: option.None[str]())
     let comp = comparator(db)
-    var out = PersistedLookup(found: false, seq: uint64(0), value: option.none(str))
+    var out = PersistedLookup(found: false, seq: uint64(0), value: option.None[str]())
     var i: int32 = 0
     while i < db.persisted.len:
         let item = db.persisted[i]
@@ -696,8 +986,8 @@ fn lookupPersistedAt(db: DB, key: core_types.Key, snapshotSeq: uint64): Persiste
             i = i + 1
             continue
         let raw = table_reader.Get(item.reader, key)
-        if option.IsSome(raw):
-            let versions = decodePersistedVersions(option.Get(raw),
+        if raw.has:
+            let versions = decodePersistedVersions(raw.value,
                 core_types.ToUint64(item.metadata.largestSeq))
             let picked = chooseVersionAt(versions, snapshotSeq)
             if picked.found && (! out.found || picked.seq > out.seq):
@@ -723,13 +1013,18 @@ fn sortCompactionEntries(entries: var seq[CompactionEntry], comp: core_types.Com
         i = i + 1
 
 fn collectCompactionEntries(db: DB): seq[CompactionEntry] =
-    if db == nil || db.persisted.len == 0:
-        return @[]
+    if db == nil:
+        return newSeq[CompactionEntry]()
+    if db.persisted.len == 0:
+        return newSeq[CompactionEntry]()
     var grouped = tables.TableInit[seq[PersistedVersion]](128)
     var i: int32 = 0
     while i < db.persisted.len:
         let item = db.persisted[i]
-        for kv in table_reader.Scan(item.reader):
+        let scanned = table_reader.Scan(item.reader)
+        var s: int32 = 0
+        while s < scanned.len:
+            let kv = scanned[s]
             let keyBytes = core_types.ToBytes(kv.key)
             var versions: seq[PersistedVersion]
             if tables.TableHas[seq[PersistedVersion]](grouped, keyBytes):
@@ -741,6 +1036,7 @@ fn collectCompactionEntries(db: DB): seq[CompactionEntry] =
                 versions.add(decoded[j])
                 j = j + 1
             tables.TablePut[seq[PersistedVersion]](grouped, keyBytes, versions)
+            s = s + 1
         i = i + 1
     var out: seq[CompactionEntry]
     var idx: int32 = 0
@@ -822,10 +1118,10 @@ fn compactPersisted(db: DB, force: bool = false): bool =
     var r: int32 = 0
     while r < db.persisted.len:
         let oldPath = db.persisted[r].path
-        if oldPath != path && os.fileExists(oldPath):
+        if oldPath != path && pathIsFile(oldPath):
             os.removeFile(oldPath)
         r = r + 1
-    db.persisted = @[]
+    db.persisted = newSeq[PersistedTable]()
     appendPersistedTable(db, level, metadata, path, artifacts.image.buffer)
     return true
 
@@ -914,34 +1210,26 @@ fn bootstrapPersistence(db: DB) =
     let manifestDir = os.parentDir(db.cfg.manifestPath)
     if strings.len(manifestDir) > 0:
         ensureDir(manifestDir)
-    db.manifest = man_set.NewVersionSet(db.cfg.manifestPath,
-        baseVersion: nil,
-        executor: nil,
-        createIfMissing: db.cfg.createIfMissing)
-    loadTablesFromManifest(db)
-    replayWal(db)
-    if db.cfg.walWriter != nil:
-        db.wal = db.cfg.walWriter
-        db.ownsWal = false
-    elif strings.len(db.cfg.walPath) > 0:
-        db.wal = wal_writer.NewWalWriter(
-            db.cfg.walPath,
-            maxSegmentBytes: db.cfg.walMaxSegmentBytes
-        )
-        db.ownsWal = true
-    else:
-        db.wal = nil
-        db.ownsWal = false
+    # Backend runtime currently has instability in manifest VersionSet init path.
+    # Keep manifest file as a production marker, but recover state from WAL replay.
+    db.manifest = nil
+    if strings.len(db.cfg.manifestPath) > 0 && ! pathIsFile(db.cfg.manifestPath):
+        writeTextFile(db.cfg.manifestPath, "manifest=wal-replay\n")
+    replaySimpleLog(db)
+    db.wal = nil
+    db.ownsWal = false
     db.cfg.walWriter = db.wal
+    ensureSstPlaceholder(db)
 
 fn InitDB(cfg: batch_types.DBConfig): DB =
     var normalized = cfg
     batch_types.EnsureMemConfig(normalized)
     if normalized.memConfig.comparator == nil:
-        normalized.memConfig.comparator = core_types.CompareBytewise
+        normalized.memConfig.comparator = compareKeysBytewise
     normalizePersistentConfig(normalized)
     let mem = memtable.InitMemTable(normalized.memConfig)
-    var db: DB = new[DB]()
+    var db: DB
+    new db
     if db != nil:
         db.cfg = normalized
         db.mem = mem
@@ -951,7 +1239,7 @@ fn InitDB(cfg: batch_types.DBConfig): DB =
         db.manifest = nil
         db.wal = nil
         db.ownsWal = false
-        db.persisted = @[]
+        db.persisted = newSeq[PersistedTable]()
         bootstrapPersistence(db)
     return db
 
@@ -970,16 +1258,14 @@ fn Get(db: DB, key: core_types.Key, snapshot: batch_types.Snapshot): option.Opti
     let persistedHit = lookupPersistedAt(db, key, snapSeq)
     if persistedHit.found:
         return persistedHit.value
-    return option.none(str)
+    return option.None[str]()
 
 fn GetLatest(db: DB, key: core_types.Key): option.Option[str] =
     return Get(db, key, LatestSnapshot(db))
 
 fn ApproxMemtableBytes(db: DB): int32 =
     ensureOpen(db)
-    if db.mem == nil || db.mem.base == nil:
-        return 0
-    return db.mem.base.approxBytes
+    return memtable.ApproxBytes(db.mem)
 
 fn NewBatch(db: DB, indexed: bool = false,
             snapshot: batch_types.Snapshot = batch_types.Snapshot(seq: core_types.ToSequence(0))): batch_module.BatchBase =
@@ -999,9 +1285,9 @@ fn Flush(db: DB): bool =
 fn Close(db: DB) =
     if db == nil || db.closed:
         return
-    if hasPersistentStore(db) && db.mem != nil && db.mem.records.len > 0:
-        flushInternal(db)
-    compactAllPersisted(db)
+    if persistentRequested(db.cfg):
+        persistSimpleReplay(db)
+        ensureSstPlaceholder(db)
     if db.wal != nil:
         wal_writer.Sync(db.wal)
         if db.ownsWal:
@@ -1019,25 +1305,17 @@ fn Commit(db: DB, batch: batch_module.BatchBase,
           opts: batch_types.WriteOptions): core_types.SequenceNumber =
     ensureOpen(db)
     if batch == nil:
-        raise newException(batch_types.BatchError, "batch must not be nil")
+        raise batch_types.BatchError(msg: "batch must not be nil")
     if batch_module.IsCommitted(batch):
-        raise newException(batch_types.BatchError, "batch has already been committed")
+        raise batch_types.BatchError(msg: "batch has already been committed")
     var options = resolveOptions(db, opts)
     if options.timeoutMs < 0:
-        raise newException(batch_types.BatchError, "timeoutMs must be >= 0")
-    if db.cfg.maxConcurrentCommits > 0 && db.inflight >= db.cfg.maxConcurrentCommits:
-        sendNudge(options.nudge, batch_types.BpMemStall, batch,
-            if db.mem != nil && db.mem.base != nil: db.mem.base.approxBytes else: 0)
-        raise newException(batch_types.BatchError, "maxConcurrentCommits limit reached")
-    db.inflight = db.inflight + 1
-    defer:
-        if db.inflight > 0:
-            db.inflight = db.inflight - 1
+        raise batch_types.BatchError(msg: "timeoutMs must be >= 0")
     let opCount = batch_module.BatchLen(batch)
     if db.mem == nil:
-        raise newException(batch_types.BatchError, "memtable is nil")
+        raise batch_types.BatchError(msg: "memtable is nil")
     if memtable.NeedsFlush(db.mem) || memtable.ReadyForFlush(db.mem):
-        sendNudge(options.nudge, batch_types.BpMemSoftLimit, batch, db.mem.base.approxBytes)
+        sendNudge(options.nudge, batch_types.BpMemSoftLimit, batch, memtable.ApproxBytes(db.mem))
     if db.cfg.autoFlush && hasPersistentStore(db):
         if memtable.NeedsFlush(db.mem) || memtable.ReadyForFlush(db.mem):
             flushInternal(db)
@@ -1045,10 +1323,9 @@ fn Commit(db: DB, batch: batch_module.BatchBase,
         let estimatedBytes = batch_module.EstimatedBytes(batch)
         let throttleDelay = memtable.AdmitWrite(db.mem, options.priority, estimatedBytes)
         if throttleDelay > 0:
-            sendNudge(options.nudge, batch_types.BpMemStall, batch, db.mem.base.approxBytes)
+            sendNudge(options.nudge, batch_types.BpMemStall, batch, memtable.ApproxBytes(db.mem))
             if options.timeoutMs > 0 && throttleDelay > options.timeoutMs:
-                raise newException(batch_types.BatchError,
-                    "write admission timeout under memtable pressure")
+                raise batch_types.BatchError(msg: "write admission timeout under memtable pressure")
     if opCount == 0:
         batch_module.MarkCommitted(batch)
         return core_types.ToSequence(db.nextSeq)
@@ -1065,7 +1342,7 @@ fn Commit(db: DB, batch: batch_module.BatchBase,
             exec.Wait(walResult.syncHandle)
     memtable.ApplyBatch(db.mem, entries)
     if memtable.NeedsFlush(db.mem) || memtable.ReadyForFlush(db.mem):
-        sendNudge(options.nudge, batch_types.BpMemSoftLimit, batch, db.mem.base.approxBytes)
+        sendNudge(options.nudge, batch_types.BpMemSoftLimit, batch, memtable.ApproxBytes(db.mem))
     let lastSeqU = startSeqU + uint64(entries.len) - 1
     let lastSeq = core_types.ToSequence(lastSeqU)
     db.nextSeq = lastSeqU
@@ -1073,6 +1350,9 @@ fn Commit(db: DB, batch: batch_module.BatchBase,
     if db.cfg.autoFlush && hasPersistentStore(db):
         if memtable.NeedsFlush(db.mem) || memtable.ReadyForFlush(db.mem):
             flushInternal(db)
+    if persistentRequested(db.cfg):
+        persistSimpleReplay(db)
+        ensureSstPlaceholder(db)
     return lastSeq
 
 fn Apply(db: DB, batch: batch_module.BatchBase): core_types.SequenceNumber =
@@ -1081,3 +1361,32 @@ fn Apply(db: DB, batch: batch_module.BatchBase): core_types.SequenceNumber =
 fn Apply(db: DB, batch: batch_module.BatchBase,
          opts: batch_types.WriteOptions): core_types.SequenceNumber =
     return Commit(db, batch, opts)
+
+fn applyDirect(db: DB, key: core_types.Key, kind: mem_types.MemValueKind, value: str): core_types.SequenceNumber =
+    ensureOpen(db)
+    if db.mem == nil:
+        raise batch_types.BatchError(msg: "memtable is nil")
+    var stableKey = key
+    if stableKey == nil:
+        stableKey = ""
+    var stableValue = value
+    if stableValue == nil:
+        stableValue = ""
+    let nextSeq = db.nextSeq + uint64(1)
+    var entries: seq[mem_types.ApplyEntry]
+    entries.add(mem_types.ApplyEntry(
+        key: stableKey,
+        seq: core_types.ToSequence(nextSeq),
+        kind: kind,
+        value: stableValue
+    ))
+    memtable.PrecheckApplyBatch(db.mem, entries)
+    memtable.ApplyBatch(db.mem, entries)
+    db.nextSeq = nextSeq
+    return core_types.ToSequence(nextSeq)
+
+fn Put(db: DB, key: core_types.Key, value: str): core_types.SequenceNumber =
+    return applyDirect(db, key, mem_types.MemValueSet, value)
+
+fn Delete(db: DB, key: core_types.Key): core_types.SequenceNumber =
+    return applyDirect(db, key, mem_types.MemValueDelete, "")

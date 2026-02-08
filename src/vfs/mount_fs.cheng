@@ -35,8 +35,8 @@ fn isAlphaAscii(ch: char): bool =
     return (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z')
 
 fn isDriveRoot(path: str): bool =
-    return strings.len(path) == 3 && strings.charAt(path, 1) == ':' &&
-        isAlphaAscii(strings.charAt(path, 0)) && isPathSep(strings.charAt(path, 2))
+    return strings.len(path) == 3 && path[1] == ':' &&
+        isAlphaAscii(path[0]) && isPathSep(path[2])
 
 fn normalizeSep(path: str): str =
     if path == nil || strings.len(path) == 0:
@@ -45,7 +45,7 @@ fn normalizeSep(path: str): str =
     var i: int32 = 0
     let n: int32 = strings.len(path)
     while i < n:
-        let ch: char = strings.charAt(path, i)
+        let ch: char = path[i]
         if ch == '\\':
             out = out & "/"
         else:
@@ -59,7 +59,7 @@ fn stripTrailingSep(path: str): str =
     if isDriveRoot(path):
         return path
     var end: int32 = strings.len(path) - 1
-    while end > 0 && isPathSep(strings.charAt(path, end)):
+    while end > 0 && isPathSep(path[end]):
         end = end - 1
     if end == strings.len(path) - 1:
         return path
@@ -70,7 +70,7 @@ fn stripLeadingSep(path: str): str =
         return ""
     var idx: int32 = 0
     let n: int32 = strings.len(path)
-    while idx < n && isPathSep(strings.charAt(path, idx)):
+    while idx < n && isPathSep(path[idx]):
         idx = idx + 1
     if idx >= n:
         return ""
@@ -87,7 +87,7 @@ fn startsWith(text: str, prefix: str): bool =
         return false
     var i: int32 = 0
     while i < m:
-        if strings.charAt(text, i) != strings.charAt(prefix, i):
+        if text[i] != prefix[i]:
             return false
         i = i + 1
     return true
@@ -95,7 +95,7 @@ fn startsWith(text: str, prefix: str): bool =
 fn prefixWithSep(binding: MountBinding): str =
     if binding.logical == nil || strings.len(binding.logical) == 0:
         return ""
-    let last: char = strings.charAt(binding.logical, strings.len(binding.logical) - 1)
+    let last: char = binding.logical[strings.len(binding.logical) - 1]
     if isPathSep(last):
         return binding.logical
     return binding.logical & "/"
@@ -159,12 +159,12 @@ fn resolve(state: MountFileSystemState, path: str): MountResolution =
         i = i + 1
     if state.passThrough:
         return MountResolution(path: logical, readOnly: false, matched: false)
-    raise newException(vtypes.VfsError, "path not mounted: " & path)
+    raise vtypes.VfsError(msg: "path not mounted: " & path)
 
 fn ensureWritable(state: MountFileSystemState, res: MountResolution, op: str, original: str) =
     state
     if res.readOnly:
-        raise newException(vtypes.VfsError, op & " hits read-only mount: " & original)
+        raise vtypes.VfsError(msg: op & " hits read-only mount: " & original)
 
 fn NewMountPoint(logicalPrefix: str, physicalPrefix: str, readOnly: bool = true): MountPoint =
     return MountPoint(logicalPrefix: logicalPrefix, physicalPrefix: physicalPrefix, readOnly: readOnly)
@@ -178,7 +178,7 @@ fn ReadWriteMount(logicalPrefix: str, physicalPrefix: str): MountPoint =
 fn NewMountFileSystem(base: vtypes.FileSystem, mounts: seq[MountPoint],
                       passThroughUnmatched: bool = false): vtypes.FileSystem =
     if base == nil:
-        raise newException(ValueError, "base FileSystem must not be nil")
+        raise ValueError(msg: "base FileSystem must not be nil")
     var bindings: seq[MountBinding]
     var i: int32 = 0
     while i < mounts.len:
@@ -189,7 +189,8 @@ fn NewMountFileSystem(base: vtypes.FileSystem, mounts: seq[MountPoint],
         i = i + 1
     sortBindings(bindings)
     let state = MountFileSystemState(base: base, bindings: bindings, passThrough: passThroughUnmatched)
-    var fs: vtypes.FileSystem = new[vtypes.FileSystem]()
+    var fs: vtypes.FileSystem
+    new fs
     fs.createFn = fn(self: vtypes.FileSystem, path: str,
                       category: vtypes.DiskWriteCategory): vtypes.File =
         self

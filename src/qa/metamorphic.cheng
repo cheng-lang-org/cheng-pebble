@@ -42,7 +42,8 @@ fn DefaultQARunnerConfig(): QARunnerConfig =
     )
 
 fn InitRng(seed: uint64): SimpleRng =
-    var rng: SimpleRng = new[SimpleRng]()
+    var rng: SimpleRng
+    new rng
     if rng != nil:
         rng.state = if seed == uint64(0): uint64(0x9e3779b97f4a7c15) else: seed
     return rng
@@ -96,7 +97,7 @@ fn RunScenario(actions: seq[qa_dsl.QAAction],
                 batch_db.Close(sharedDb)
             sharedDb = factory()
             if sharedDb == nil:
-                raise newException(batch_types.BatchError, "QA runner DB factory returned nil")
+                raise batch_types.BatchError(msg: "QA runner DB factory returned nil")
             if cfg.freshDbEachIteration:
                 persistentState = @[]
         var sequence: seq[qa_dsl.QAAction]

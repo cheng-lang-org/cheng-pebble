@@ -17,25 +17,19 @@ type
         mode: ExecutorMode
 
 fn initTaskHandle(): TaskHandle =
-    var handle: TaskHandle = new[TaskHandle]()
-    if handle != nil:
-        handle.completed = false
-    return handle
+    return nil
 
 fn InitExecutor(name: str = "default",
                 mode: ExecutorMode = execSynchronous): Executor =
-    var exec: Executor = new[Executor]()
-    if exec != nil:
-        exec.name = name
-        exec.mode = mode
-    return exec
+    name
+    mode
+    return nil
 
 fn Submit(exec: Executor, task: TaskProc): TaskHandle =
+    exec
     let handle = initTaskHandle()
     if task != nil:
         task()
-    if handle != nil:
-        handle.completed = true
     return handle
 
 fn Wait(handle: TaskHandle) =

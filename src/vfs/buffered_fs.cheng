@@ -33,7 +33,7 @@ fn flushWriteBuffer(state: BufferedFileState) =
         let src = sys.ptr_add(state.writeBuf.buffer, total)
         let written = vtypes.Write(state.inner, src, state.writeLen - total)
         if written <= 0:
-            raise newException(vtypes.VfsError, "buffered write failed")
+            raise vtypes.VfsError(msg: "buffered write failed")
         total = total + written
     state.writeLen = 0
 
@@ -60,7 +60,8 @@ fn NewBufferedFile(inner: vtypes.File, bufferSize: int32 = DefaultBufferSize): v
         writeLen: 0,
         bufferSize: size
     )
-    var out: vtypes.File = new[vtypes.File]()
+    var out: vtypes.File
+    new out
     out.closeFn = fn(self: vtypes.File) =
         self
         if state.inner == nil:
@@ -163,12 +164,13 @@ fn wrapFile(state: BufferedFileSystemState, file: vtypes.File): vtypes.File =
 fn NewBufferedFileSystem(base: vtypes.FileSystem,
                          bufferSize: int32): vtypes.FileSystem =
     if base == nil:
-        raise newException(ValueError, "base FileSystem must not be nil")
+        raise ValueError(msg: "base FileSystem must not be nil")
     var size = bufferSize
     if size < MinBufferSize:
         size = MinBufferSize
     let state = BufferedFileSystemState(base: base, bufferSize: size)
-    var fs: vtypes.FileSystem = new[vtypes.FileSystem]()
+    var fs: vtypes.FileSystem
+    new fs
     fs.createFn = fn(self: vtypes.FileSystem, path: str,
                       category: vtypes.DiskWriteCategory): vtypes.File =
         self

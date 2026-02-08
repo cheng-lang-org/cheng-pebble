@@ -3,7 +3,7 @@ module pebble_vfs_cache_fs
 import cheng/pebble/vfs/types as vtypes
 import std/system as sys
 import std/strings as strings
-import std/std/monotimes as monotimes
+import std/monotimes as monotimes
 
 type
     CacheEntry = ref
@@ -54,7 +54,7 @@ fn startsWith(text: str, prefix: str): bool =
         return false
     var i: int32 = 0
     while i < m:
-        if strings.charAt(text, i) != strings.charAt(prefix, i):
+        if text[i] != prefix[i]:
             return false
         i = i + 1
     return true
@@ -122,9 +122,9 @@ fn evictIfNeeded(cache: ReadCache) =
 
 fn NewReadCache(capacityBytes: int64, maxEntries: int32 = 256): ReadCache =
     if capacityBytes <= 0:
-        raise newException(ValueError, "capacityBytes must be > 0")
+        raise ValueError(msg: "capacityBytes must be > 0")
     if maxEntries <= 0:
-        raise newException(ValueError, "maxEntries must be > 0")
+        raise ValueError(msg: "maxEntries must be > 0")
     return ReadCache(
         entries: @[],
         order: @[],
@@ -205,7 +205,8 @@ fn NewCachedReadFile(cache: ReadCache, entry: CacheEntry): vtypes.File =
     if entry == nil:
         return nil
     let state = CachedReadFileState(cache: cache, entry: entry, offset: 0)
-    var file: vtypes.File = new[vtypes.File]()
+    var file: vtypes.File
+    new file
     file.closeFn = fn(self: vtypes.File) =
         self
         state.cache = nil
@@ -242,22 +243,22 @@ fn NewCachedReadFile(cache: ReadCache, entry: CacheEntry): vtypes.File =
         self
         src
         size
-        raise newException(vtypes.VfsError, "cached file is read-only")
+        raise vtypes.VfsError(msg: "cached file is read-only")
     file.writeAtFn = fn(self: vtypes.File, src: void*, size: int32, offset: int64): int32 =
         self
         src
         size
         offset
-        raise newException(vtypes.VfsError, "cached file is read-only")
+        raise vtypes.VfsError(msg: "cached file is read-only")
     file.preallocateFn = fn(self: vtypes.File, offset: int64, length: int64) =
         self
         offset
         length
-        raise newException(vtypes.VfsError, "cached file does not support preallocate")
+        raise vtypes.VfsError(msg: "cached file does not support preallocate")
     file.statFn = fn(self: vtypes.File): vtypes.FileInfo =
         self
         if state.entry == nil:
-            raise newException(vtypes.VfsError, "cache entry released")
+            raise vtypes.VfsError(msg: "cache entry released")
         return state.entry.info
     file.syncFn = fn(self: vtypes.File) =
         self
@@ -280,12 +281,12 @@ fn NewCachedReadFile(cache: ReadCache, entry: CacheEntry): vtypes.File =
                      access: vtypes.MmapAccess): vtypes.MmapRegion =
         self
         if state.entry == nil:
-            raise newException(vtypes.VfsError, "cache entry released")
+            raise vtypes.VfsError(msg: "cache entry released")
         if access == vtypes.MapReadWrite:
-            raise newException(vtypes.VfsError, "cache map is read-only")
+            raise vtypes.VfsError(msg: "cache map is read-only")
         let off: int64 = offset
         if off < 0 || off >= int64(state.entry.data.len):
-            raise newException(vtypes.VfsError, "map out of range")
+            raise vtypes.VfsError(msg: "map out of range")
         let maxLen: int32 = int32(int64(state.entry.data.len) - off)
         let mapped = if length <= 0 || length > maxLen: maxLen else: length
         let base = sys.ptr_add(state.entry.data.buffer, int32(off))
@@ -345,7 +346,7 @@ fn NewCachingFileSystem(base: vtypes.FileSystem, capacityBytes: int64,
                         maxEntries: int32,
                         maxCachedFileSize: int64): vtypes.FileSystem =
     if base == nil:
-        raise newException(ValueError, "base FileSystem must not be nil")
+        raise ValueError(msg: "base FileSystem must not be nil")
     let cache = NewReadCache(capacityBytes, maxEntries)
     var limit: int64
     if maxCachedFileSize <= 0:
@@ -357,16 +358,17 @@ fn NewCachingFileSystem(base: vtypes.FileSystem, capacityBytes: int64,
 fn NewCachingFileSystemWithCache(base: vtypes.FileSystem, cache: ReadCache,
                                  maxCachedFileSize: int64): vtypes.FileSystem =
     if base == nil:
-        raise newException(ValueError, "base FileSystem must not be nil")
+        raise ValueError(msg: "base FileSystem must not be nil")
     if cache == nil:
-        raise newException(ValueError, "cache must not be nil")
+        raise ValueError(msg: "cache must not be nil")
     var limit: int64
     if maxCachedFileSize <= 0:
         limit = maxInt64(cache.capacityBytes / 4, 128 * 1024)
     else:
         limit = maxCachedFileSize
     let state = CachingFileSystemState(base: base, cache: cache, maxCachedFileSize: limit)
-    var fs: vtypes.FileSystem = new[vtypes.FileSystem]()
+    var fs: vtypes.FileSystem
+    new fs
     fs.createFn = fn(self: vtypes.FileSystem, path: str,
                       category: vtypes.DiskWriteCategory): vtypes.File =
         self

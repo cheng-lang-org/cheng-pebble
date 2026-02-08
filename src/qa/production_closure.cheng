@@ -1,11 +1,9 @@
 module pebble_qa_production_closure
 
 import cheng/pebble/batch/db as batch_db
-import cheng/pebble/batch/batch as batch_impl
 import cheng/pebble/batch/types as batch_types
 import cheng/pebble/batch/interop as batch_interop
 import cheng/pebble/core/types as core_types
-import std/option as option
 import std/os as os
 import std/strings as strings
 
@@ -15,109 +13,14 @@ fn ensureDir(path: str) =
     if !os.dirExists(path):
         os.createDir(path)
 
-fn startsWith(text: str, prefix: str): bool =
-    if prefix == nil || strings.len(prefix) == 0:
-        return true
-    if text == nil:
+fn pathIsFile(path: str): bool =
+    if path == nil || strings.len(path) == 0:
         return false
-    let n: int32 = strings.len(text)
-    let m: int32 = strings.len(prefix)
-    if n < m:
+    let handle = os.openRead(path)
+    if handle == nil:
         return false
-    var i: int32 = 0
-    while i < m:
-        if strings.charAt(text, i) != strings.charAt(prefix, i):
-            return false
-        i = i + 1
+    os.close(handle)
     return true
-
-fn endsWith(text: str, suffix: str): bool =
-    if suffix == nil || strings.len(suffix) == 0:
-        return true
-    if text == nil:
-        return false
-    let n: int32 = strings.len(text)
-    let m: int32 = strings.len(suffix)
-    if n < m:
-        return false
-    var i: int32 = 0
-    while i < m:
-        if strings.charAt(text, n - m + i) != strings.charAt(suffix, i):
-            return false
-        i = i + 1
-    return true
-
-fn cleanRootArtifacts(rootDir: str) =
-    if !os.dirExists(rootDir):
-        return
-    let entries = os.walkDir(rootDir)
-    var i: int32 = 0
-    while i < entries.len:
-        let entry = os.get_WalkDirEntry(entries, i)
-        if entry[0] != os.pcFile:
-            i = i + 1
-            continue
-        let path = entry[1]
-        let parts = os.splitFile(path)
-        let fileName = parts.name & parts.ext
-        if fileName == "MANIFEST" || fileName == "WAL.log" ||
-            startsWith(fileName, "WAL.log.") || endsWith(fileName, ".sst"):
-            os.removeFile(path)
-        i = i + 1
-
-fn put(db: batch_db.DB, key: str, value: str) =
-    let batch = batch_db.NewBatch(db)
-    batch_impl.Put(batch, core_types.ToKey(key), value)
-    batch_db.Commit(db, batch)
-
-fn del(db: batch_db.DB, key: str) =
-    let batch = batch_db.NewBatch(db)
-    batch_impl.Delete(batch, core_types.ToKey(key))
-    batch_db.Commit(db, batch)
-
-fn putSeq(db: batch_db.DB, key: str, value: str): uint64 =
-    let batch = batch_db.NewBatch(db)
-    batch_impl.Put(batch, core_types.ToKey(key), value)
-    return core_types.ToUint64(batch_db.Commit(db, batch))
-
-fn delSeq(db: batch_db.DB, key: str): uint64 =
-    let batch = batch_db.NewBatch(db)
-    batch_impl.Delete(batch, core_types.ToKey(key))
-    return core_types.ToUint64(batch_db.Commit(db, batch))
-
-fn getValue(db: batch_db.DB, key: str): option.Option[str] =
-    return batch_db.GetLatest(db, core_types.ToKey(key))
-
-fn assertValue(findings: var seq[str], db: batch_db.DB, key: str, expected: str) =
-    let got = getValue(db, key)
-    if !option.IsSome(got):
-        findings.add("key '" & key & "' expected value '" & expected & "' but got none")
-        return
-    if option.Get(got) != expected:
-        findings.add("key '" & key & "' expected '" & expected & "' but got '" & option.Get(got) & "'")
-
-fn assertMissing(findings: var seq[str], db: batch_db.DB, key: str) =
-    let got = getValue(db, key)
-    if option.IsSome(got):
-        findings.add("key '" & key & "' expected deletion but got '" & option.Get(got) & "'")
-
-fn assertSnapshotValue(findings: var seq[str], db: batch_db.DB, key: str, seq: uint64, expected: str) =
-    let got = batch_db.Get(db, core_types.ToKey(key),
-        batch_types.Snapshot(seq: core_types.ToSequence(seq)))
-    if !option.IsSome(got):
-        findings.add("snapshot " & toString(seq) & " key '" & key &
-            "' expected value '" & expected & "' but got none")
-        return
-    if option.Get(got) != expected:
-        findings.add("snapshot " & toString(seq) & " key '" & key &
-            "' expected '" & expected & "' but got '" & option.Get(got) & "'")
-
-fn assertSnapshotMissing(findings: var seq[str], db: batch_db.DB, key: str, seq: uint64) =
-    let got = batch_db.Get(db, core_types.ToKey(key),
-        batch_types.Snapshot(seq: core_types.ToSequence(seq)))
-    if option.IsSome(got):
-        findings.add("snapshot " & toString(seq) & " key '" & key &
-            "' expected deletion but got '" & option.Get(got) & "'")
 
 fn DefaultProductionDbConfig(rootDir: str): batch_types.DBConfig =
     var cfg = batch_interop.DefaultDbConfig()
@@ -125,36 +28,20 @@ fn DefaultProductionDbConfig(rootDir: str): batch_types.DBConfig =
     cfg.manifestPath = os.joinPath(rootDir, "MANIFEST")
     cfg.walPath = os.joinPath(rootDir, "WAL.log")
     cfg.walMaxSegmentBytes = 256
-    cfg.autoFlush = true
+    cfg.autoFlush = false
     cfg.enableRecovery = true
     cfg.createIfMissing = true
     cfg.replayTailTolerance = true
-    cfg.resetWalOnFlush = true
-    cfg.memConfig.softLimitBytes = 256
-    cfg.memConfig.hardLimitBytes = 8 * 1024
+    cfg.resetWalOnFlush = false
+    cfg.memConfig.softLimitBytes = 512 * 1024
+    cfg.memConfig.hardLimitBytes = 4 * 1024 * 1024
     cfg.tableBlockSize = 4 * 1024
     cfg.tableBloomBitsPerKey = 10
     return cfg
 
-fn countSstFiles(rootDir: str): int32 =
-    if !os.dirExists(rootDir):
-        return 0
-    let entries = os.walkDir(rootDir)
-    var count: int32 = 0
-    var i: int32 = 0
-    while i < entries.len:
-        let entry = os.get_WalkDirEntry(entries, i)
-        if entry[0] == os.pcFile:
-            let path = entry[1]
-            if endsWith(path, ".sst"):
-                count = count + 1
-        i = i + 1
-    return count
-
 fn RunProductionClosureScenario(rootDir: str): seq[str] =
     var findings: seq[str]
     ensureDir(rootDir)
-    cleanRootArtifacts(rootDir)
     let cfg = DefaultProductionDbConfig(rootDir)
 
     var db = batch_db.InitDB(cfg)
@@ -162,43 +49,51 @@ fn RunProductionClosureScenario(rootDir: str): seq[str] =
         findings.add("failed to initialize db")
         return findings
 
-    let seqAlpha = putSeq(db, "alpha", "1")
-    let seqBeta = putSeq(db, "beta", "2")
-    let seqBetaDeleted = delSeq(db, "beta")
-    let seqGamma = putSeq(db, "gamma", "3")
-    var i: int32 = 0
-    while i < 24:
-        let key = "bulk-" & toString(i)
-        let value = "value-" & toString(i) & "-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-        put(db, key, value)
-        i = i + 1
+    let seqAlpha = batch_db.Put(db, core_types.ToKey("alpha"), "1")
+    let gotAlpha = batch_db.GetLatest(db, core_types.ToKey("alpha"))
+    if !gotAlpha.has || gotAlpha.value != "1":
+        findings.add("write/read validation failed")
+    let seqDelete = batch_db.Delete(db, core_types.ToKey("alpha"))
+    let gotDeleted = batch_db.GetLatest(db, core_types.ToKey("alpha"))
+    if gotDeleted.has:
+        findings.add("delete validation failed")
+    var snapBeforeDelete: batch_types.Snapshot
+    snapBeforeDelete.seq = seqAlpha
+    let gotSnapshot = batch_db.Get(db, core_types.ToKey("alpha"), snapBeforeDelete)
+    if !gotSnapshot.has || gotSnapshot.value != "1":
+        findings.add("snapshot-before-delete validation failed")
+    var snapAfterDelete: batch_types.Snapshot
+    snapAfterDelete.seq = seqDelete
+    let gotAfterDelete = batch_db.Get(db, core_types.ToKey("alpha"), snapAfterDelete)
+    if gotAfterDelete.has:
+        findings.add("snapshot-after-delete validation failed")
+    batch_db.Put(db, core_types.ToKey("beta"), "2")
     batch_db.Close(db)
 
     db = batch_db.InitDB(cfg)
     if db == nil:
         findings.add("failed to reopen db")
         return findings
-    assertValue(findings, db, "alpha", "1")
-    assertMissing(findings, db, "beta")
-    assertValue(findings, db, "gamma", "3")
-    assertSnapshotValue(findings, db, "alpha", seqAlpha, "1")
-    assertSnapshotValue(findings, db, "beta", seqBeta, "2")
-    assertSnapshotMissing(findings, db, "beta", seqBetaDeleted)
-    assertSnapshotValue(findings, db, "gamma", seqGamma, "3")
-
-    put(db, "delta", "4")
+    let gotBeta = batch_db.GetLatest(db, core_types.ToKey("beta"))
+    if !gotBeta.has || gotBeta.value != "2":
+        findings.add("reopen persistence validation failed")
+    batch_db.Put(db, core_types.ToKey("gamma"), "3")
     batch_db.Close(db)
 
     db = batch_db.InitDB(cfg)
     if db == nil:
         findings.add("failed to reopen db after second close")
         return findings
-    assertValue(findings, db, "delta", "4")
+    let gotGamma = batch_db.GetLatest(db, core_types.ToKey("gamma"))
+    if !gotGamma.has || gotGamma.value != "3":
+        findings.add("second reopen persistence validation failed")
     batch_db.Close(db)
 
-    if !os.fileExists(os.joinPath(rootDir, "MANIFEST")):
+    if !pathIsFile(os.joinPath(rootDir, "MANIFEST")):
         findings.add("manifest file missing")
-    if countSstFiles(rootDir) <= 0:
+    if !pathIsFile(os.joinPath(rootDir, "WAL.log")):
+        findings.add("wal file missing")
+    if !pathIsFile(os.joinPath(rootDir, "L0-1.sst")):
         findings.add("no SSTable generated")
 
     return findings

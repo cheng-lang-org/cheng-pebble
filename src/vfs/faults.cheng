@@ -41,7 +41,7 @@ fn NewFaultInjector(): FaultInjector =
 
 fn AddHook(injector: FaultInjector, hook: FaultHook) =
     if injector == nil:
-        raise newException(ValueError, "FaultInjector must not be nil")
+        raise ValueError(msg: "FaultInjector must not be nil")
     injector.hooks.add(hook)
 
 fn ClearHooks(injector: FaultInjector) =
@@ -57,7 +57,7 @@ fn ShouldFail(injector: FaultInjector, op: FaultOp, path: str) =
         let hook = injector.hooks[i]
         let verdict = hook(op, path)
         if option.IsSome(verdict):
-            raise newException(IOError, option.Get(verdict))
+            raise IOError(msg: option.Get(verdict))
         i = i + 1
 
 fn HasHooks(injector: FaultInjector): bool =

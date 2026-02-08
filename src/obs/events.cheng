@@ -2,7 +2,7 @@ module pebble_obs_events
 
 import cheng/pebble/obs/types as obs_types
 import std/seqs as seqs
-import std/std/times as times
+import std/times as times
 
 type
     EventBus = ref
@@ -11,7 +11,8 @@ type
         maxBuffer: int32
 
 fn NewEventBus(maxBuffer: int32 = 256): EventBus =
-    var bus: EventBus = new[EventBus]()
+    var bus: EventBus
+    new bus
     if bus != nil:
         bus.listeners = @[]
         bus.buffer = @[]

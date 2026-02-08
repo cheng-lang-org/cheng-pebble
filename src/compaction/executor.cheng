@@ -6,7 +6,7 @@ import cheng/pebble/manifest/types as man_types
 import cheng/pebble/sstable/table_reader as table_reader
 import cheng/pebble/sstable/table_builder as table_builder
 import cheng/pebble/sstable/types as sstable_types
-import std/std/times as times
+import std/times as times
 
 
 type
@@ -37,7 +37,8 @@ fn InitCompactionExecutor(provider: CompactionInputProvider,
                           comparator: core_types.Comparator = core_types.CompareBytewise,
                           blockSize: int32 = 32 * 1024,
                           bloomBitsPerKey: int32 = 10): CompactionExecutor =
-    var exec: CompactionExecutor = new[CompactionExecutor]()
+    var exec: CompactionExecutor
+    new exec
     if exec != nil:
         exec.provider = provider
         exec.writer = writer
@@ -87,8 +88,12 @@ fn collectEntries(readers: seq[table_reader.TableReader]): seq[CompactionEntry] 
     while i < readers.len:
         let reader = readers[i]
         if reader != nil:
-            for kv in table_reader.Scan(reader):
+            let scanned = table_reader.Scan(reader)
+            var s: int32 = 0
+            while s < scanned.len:
+                let kv = scanned[s]
                 out.add(CompactionEntry(key: kv.key, value: kv.value, sourceOrder: i))
+                s = s + 1
         i = i + 1
     return out
 
@@ -142,9 +147,9 @@ fn BuildArtifacts(exec: CompactionExecutor,
 fn ExecutePlan(exec: CompactionExecutor,
               plan: comp_types.CompactionPlan): comp_types.CompactionResult =
     if exec == nil:
-        raise newException(comp_types.CompactionError, "compaction executor is nil")
+        raise comp_types.CompactionError(msg: "compaction executor is nil")
     if exec.provider == nil:
-        raise newException(comp_types.CompactionError, "compaction input provider is nil")
+        raise comp_types.CompactionError(msg: "compaction input provider is nil")
     let start = times.epochTime()
     let readers = exec.provider(plan)
     var entries = collectEntries(readers)

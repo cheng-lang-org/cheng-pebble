@@ -1,10 +1,10 @@
 module pebble_vfs_prefetch_rate
 
 import cheng/pebble/vfs/types as vtypes
-import std/std/monotimes as monotimes
+import std/monotimes as monotimes
 
 @importc("usleep")
-fn c_usleep(usec: uint32): int32
+fn prefetch_c_usleep(usec: uint32): int32
 
 type
     RateLimiter = ref
@@ -78,7 +78,7 @@ fn sleepForNs(nanos: int64) =
         usec = 1
     while usec > 0:
         let step = if usec > 1000000: uint32(1000000) else: uint32(usec)
-        c_usleep(step)
+        prefetch_c_usleep(step)
         usec = usec - int64(step)
 
 fn Acquire(limiter: RateLimiter, amount: int32) =
@@ -138,7 +138,8 @@ fn wrap(state: RateLimitedFileSystemState, file: vtypes.File, path: str): vtypes
         asyncPrefetch: state.asyncPrefetch,
         path: path
     )
-    var out: vtypes.File = new[vtypes.File]()
+    var out: vtypes.File
+    new out
     out.closeFn = fn(self: vtypes.File) =
         self
         if st.inner != nil:
@@ -179,19 +180,13 @@ fn wrap(state: RateLimitedFileSystemState, file: vtypes.File, path: str): vtypes
         self
         if length <= 0:
             return
-        let limiter = st.readLimiter
-        let innerFile = st.inner
-        let reqLen = length
         let prefetchTask = PrefetchTask(
-            limiter: limiter,
-            file: innerFile,
+            limiter: st.readLimiter,
+            file: st.inner,
             offset: offset,
-            length: reqLen
+            length: length
         )
-        let task = fn() =
-            runPrefetchTask(prefetchTask)
-        let req = ScheduleRequest(executor: st.prefetcher, job: task)
-        runSchedule(req)
+        runPrefetchTask(prefetchTask)
     out.fdFn = fn(self: vtypes.File): uint64 =
         self
         return vtypes.Fd(st.inner)
@@ -205,7 +200,7 @@ fn NewRateLimitedFileSystem(base: vtypes.FileSystem, readBytesPerSec: float64,
                             writeBytesPerSec: float64, asyncPrefetch: bool,
                             maxPrefetchInFlight: int32): vtypes.FileSystem =
     if base == nil:
-        raise newException(ValueError, "base FileSystem must not be nil")
+        raise ValueError(msg: "base FileSystem must not be nil")
     let state = RateLimitedFileSystemState(
         base: base,
         readLimiter: NewRateLimiter(readBytesPerSec),
@@ -213,7 +208,8 @@ fn NewRateLimitedFileSystem(base: vtypes.FileSystem, readBytesPerSec: float64,
         prefetcher: NewPrefetchExecutor(maxPrefetchInFlight, asyncPrefetch),
         asyncPrefetch: asyncPrefetch
     )
-    var fs: vtypes.FileSystem = new[vtypes.FileSystem]()
+    var fs: vtypes.FileSystem
+    new fs
     fs.createFn = fn(self: vtypes.FileSystem, path: str,
                       category: vtypes.DiskWriteCategory): vtypes.File =
         self

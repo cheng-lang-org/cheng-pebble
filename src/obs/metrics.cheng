@@ -1,10 +1,12 @@
 module pebble_obs_metrics
 
+import cheng/pebble/core/text as text
 import cheng/pebble/obs/types as obs_types
+import std/system as sys
 import std/tables as tables
 import std/strings as strings
-import std/std/strutils as strutils
-import std/std/times as times
+import std/strutils as strutils
+import std/times as times
 
 type
     MetricDatum =
@@ -26,7 +28,8 @@ const
     DefaultHistogramBuckets = @[0.001, 0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]
 
 fn NewMetricsRegistry(buckets: seq[float64] = DefaultHistogramBuckets): MetricsRegistry =
-    var registry: MetricsRegistry = new[MetricsRegistry]()
+    var registry: MetricsRegistry
+    new registry
     if registry != nil:
         registry.metrics = tables.TableInit[MetricEntry](32)
         registry.defaultBuckets = buckets
@@ -57,7 +60,8 @@ fn ensureMetric(registry: MetricsRegistry, descriptor: obs_types.MetricDescripto
         return nil
     if tables.TableHas[MetricEntry](registry.metrics, descriptor.name):
         return tables.TableGet[MetricEntry](registry.metrics, descriptor.name)
-    var entry: MetricEntry = new[MetricEntry]()
+    var entry: MetricEntry
+    new entry
     if entry != nil:
         entry.desc = descriptor
         entry.data = tables.TableInit[MetricDatum](32)
@@ -178,7 +182,7 @@ fn escapeLabel(value: str): str =
     return out
 
 fn int64ToStr(value: int64): str =
-    return toString(value)
+    return text.toText(value)
 
 fn floatToStr(value: float64): str =
     return strutils.formatFloat(value)

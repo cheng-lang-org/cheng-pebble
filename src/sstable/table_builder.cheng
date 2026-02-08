@@ -1,9 +1,10 @@
 module pebble_sstable_table_builder
 
+import cheng/pebble/core/text as text
 import cheng/pebble/core/types as core_types
 import cheng/pebble/sstable/types as sstable_types
 import cheng/pebble/sstable/encoding as enc
-import cheng/pebble/sstable/block as block
+import cheng/pebble/sstable/block as block_mod
 import cheng/pebble/sstable/filter as filter
 import std/option as option
 import std/system as sys
@@ -19,7 +20,7 @@ type
         comparator: core_types.Comparator
         blockSize: int32
         buffer: seq[uint8]
-        currentBlock: block.BlockBuilder
+        currentBlock: block_mod.BlockBuilder
         prefixCompression: bool
         lastKey: option.Option[core_types.Key]
         sections: seq[sstable_types.TableSection]
@@ -56,24 +57,24 @@ fn InitTableBuilder(comparator: core_types.Comparator = core_types.CompareBytewi
                     bloomBitsPerKey: int32 = DefaultBloomBitsPerKey,
                     enablePrefixCompression: bool = true): TableBuilder =
     if blockSize <= 0:
-        raise newException(sstable_types.SSTError, "blockSize must be positive")
+        raise sstable_types.SSTError(msg: "blockSize must be positive")
     var builder: TableBuilder
     builder.comparator = comparator
     builder.blockSize = blockSize
-    builder.buffer = @[]
+    builder.buffer = newSeq[uint8]()
     builder.prefixCompression = enablePrefixCompression
-    builder.currentBlock = block.InitBlockBuilder(enablePrefixCompression)
-    builder.lastKey = option.none(core_types.Key)
-    builder.sections = @[]
-    builder.indexEntries = @[]
+    builder.currentBlock = block_mod.InitBlockBuilder(enablePrefixCompression)
+    builder.lastKey = option.None[core_types.Key]()
+    builder.sections = newSeq[sstable_types.TableSection]()
+    builder.indexEntries = newSeq[sstable_types.IndexEntry]()
     builder.properties = sstable_types.TableProperties()
     builder.filterEnabled = bloomBitsPerKey > 0
     builder.filterBitsPerKey = bloomBitsPerKey
     if builder.filterEnabled:
         builder.filterBuilder = filter.InitBloomFilterBuilder(bloomBitsPerKey)
         builder.properties.bloomBitsPerKey = option.some(bloomBitsPerKey)
-    builder.pendingHandle = option.none(sstable_types.BlockHandle)
-    builder.pendingLastKey = option.none(core_types.Key)
+    builder.pendingHandle = option.None[sstable_types.BlockHandle]()
+    builder.pendingLastKey = option.None[core_types.Key]()
     return builder
 
 fn updateProperties(builder: var TableBuilder, key: core_types.Key, value: str) =
@@ -98,9 +99,9 @@ fn encodeIndex(entries: seq[sstable_types.IndexEntry]): seq[uint8] =
 
 fn encodeProperties(props: sstable_types.TableProperties): seq[uint8] =
     var records: seq[PropertyRecord]
-    records.add(PropertyRecord(key: "num_entries", value: toString(props.numEntries)))
-    records.add(PropertyRecord(key: "raw_key_size", value: toString(props.rawKeySize)))
-    records.add(PropertyRecord(key: "raw_value_size", value: toString(props.rawValueSize)))
+    records.add(PropertyRecord(key: "num_entries", value: text.toText(props.numEntries)))
+    records.add(PropertyRecord(key: "raw_key_size", value: text.toText(props.rawKeySize)))
+    records.add(PropertyRecord(key: "raw_value_size", value: text.toText(props.rawValueSize)))
     if option.IsSome(props.smallestKey):
         records.add(PropertyRecord(key: "smallest_key",
             value: core_types.ToBytes(option.Get(props.smallestKey))))
@@ -109,7 +110,7 @@ fn encodeProperties(props: sstable_types.TableProperties): seq[uint8] =
             value: core_types.ToBytes(option.Get(props.largestKey))))
     if option.IsSome(props.bloomBitsPerKey):
         records.add(PropertyRecord(key: "bloom_bits_per_key",
-            value: toString(option.Get(props.bloomBitsPerKey))))
+            value: text.toText(option.Get(props.bloomBitsPerKey))))
     var buffer: seq[uint8]
     enc.AppendVarint(buffer, uint64(records.len))
     var i: int32 = 0
@@ -138,7 +139,7 @@ fn encodeFooter(indexHandle: sstable_types.BlockHandle,
     var buffer: seq[uint8]
     appendSeq(buffer, payload)
     appendUint32LE(buffer, uint32(payload.len))
-    enc.AppendStrBytes(buffer, FooterMagic)
+    enc.AppendStrBytes(buffer, "SSTN")
     return buffer
 
 fn shortestSeparator(a: core_types.Key, b: core_types.Key): core_types.Key =
@@ -146,11 +147,11 @@ fn shortestSeparator(a: core_types.Key, b: core_types.Key): core_types.Key =
     let right = core_types.ToBytes(b)
     let limit = minInt32(strings.len(left), strings.len(right))
     var idx: int32 = 0
-    while idx < limit && strings.charAt(left, idx) == strings.charAt(right, idx):
+    while idx < limit && left[idx] == right[idx]:
         idx = idx + 1
     if idx < limit:
-        let current = uint8(sys.ord(strings.charAt(left, idx)))
-        let target = uint8(sys.ord(strings.charAt(right, idx)))
+        let current = uint8(int32(left[idx]))
+        let target = uint8(int32(right[idx]))
         if current < uint8(0xFF) && current + uint8(1) < target:
             let prefix = if idx == 0: "" else: left[0..idx - 1]
             let nextChar = strings.charToStr(sys.chr(int32(current + uint8(1))))
@@ -164,7 +165,7 @@ fn shortestSuccessor(a: core_types.Key): core_types.Key =
         return core_types.ToKey(strings.charToStr(sys.chr(0)))
     var idx: int32 = n - 1
     while true:
-        let value = uint8(sys.ord(strings.charAt(bytes, idx)))
+        let value = uint8(int32(bytes[idx]))
         if value < uint8(0xFF):
             let prefix = if idx == 0: "" else: bytes[0..idx - 1]
             let nextChar = strings.charToStr(sys.chr(int32(value + uint8(1))))
@@ -184,8 +185,8 @@ fn emitPendingIndex(builder: var TableBuilder, nextKey: core_types.Key) =
             handle: option.Get(builder.pendingHandle)
         )
     )
-    builder.pendingHandle = option.none(sstable_types.BlockHandle)
-    builder.pendingLastKey = option.none(core_types.Key)
+    builder.pendingHandle = option.None[sstable_types.BlockHandle]()
+    builder.pendingLastKey = option.None[core_types.Key]()
 
 fn emitFinalPendingIndex(builder: var TableBuilder) =
     if ! option.IsSome(builder.pendingHandle) || ! option.IsSome(builder.pendingLastKey):
@@ -197,13 +198,13 @@ fn emitFinalPendingIndex(builder: var TableBuilder) =
             handle: option.Get(builder.pendingHandle)
         )
     )
-    builder.pendingHandle = option.none(sstable_types.BlockHandle)
-    builder.pendingLastKey = option.none(core_types.Key)
+    builder.pendingHandle = option.None[sstable_types.BlockHandle]()
+    builder.pendingLastKey = option.None[core_types.Key]()
 
 fn flushCurrentBlock(builder: var TableBuilder) =
-    if block.IsEmpty(builder.currentBlock):
+    if block_mod.IsEmpty(builder.currentBlock):
         return
-    let result = block.Finish(builder.currentBlock)
+    let result = block_mod.Finish(builder.currentBlock)
     let offset = builder.buffer.len
     appendSeq(builder.buffer, result.payload)
     let handle = sstable_types.InitBlockHandle(offset, result.payload.len)
@@ -215,28 +216,30 @@ fn Add(builder: var TableBuilder, key: core_types.Key, value: str) =
     if option.IsSome(builder.pendingHandle):
         emitPendingIndex(builder, key)
     if option.IsSome(builder.lastKey):
-        if builder.comparator(option.Get(builder.lastKey), key) >= 0:
-            raise newException(sstable_types.SSTError, "keys must be added in strictly increasing order")
-    block.Add(builder.currentBlock, key, value)
+        let prevKey = option.Get(builder.lastKey)
+        let comp = builder.comparator
+        if comp(prevKey, key) >= 0:
+            raise sstable_types.SSTError(msg: "keys must be added in strictly increasing order")
+    block_mod.Add(builder.currentBlock, key, value)
     builder.lastKey = option.some(key)
     updateProperties(builder, key, value)
     if builder.filterEnabled:
         filter.AddKey(builder.filterBuilder, key)
-    if block.EstimatedSize(builder.currentBlock) >= builder.blockSize:
+    if block_mod.EstimatedSize(builder.currentBlock) >= builder.blockSize:
         flushCurrentBlock(builder)
 
 fn Finish(builder: var TableBuilder): sstable_types.TableBuildArtifacts =
     flushCurrentBlock(builder)
     emitFinalPendingIndex(builder)
     if builder.indexEntries.len == 0:
-        raise newException(sstable_types.SSTError, "table has no data blocks")
+        raise sstable_types.SSTError(msg: "table has no data blocks")
     let indexOffset = builder.buffer.len
     let indexBlock = encodeIndex(builder.indexEntries)
     appendSeq(builder.buffer, indexBlock)
     let indexHandle = sstable_types.InitBlockHandle(indexOffset, indexBlock.len)
     builder.sections.add(sstable_types.TableSection(kind: sstable_types.BlockIndex, handle: indexHandle))
     var bloomData: seq[uint8]
-    var bloomFilter = option.none(sstable_types.BloomFilter)
+    var bloomFilter = option.None[sstable_types.BloomFilter]()
     if builder.filterEnabled:
         let bloomResult = filter.Finish(builder.filterBuilder)
         bloomData = bloomResult.data
@@ -250,7 +253,7 @@ fn Finish(builder: var TableBuilder): sstable_types.TableBuildArtifacts =
     appendSeq(builder.buffer, metaBlock)
     let metaHandle = sstable_types.InitBlockHandle(metaOffset, metaBlock.len)
     builder.sections.add(sstable_types.TableSection(kind: sstable_types.BlockMeta, handle: metaHandle))
-    var footerFilterHandle = option.none(sstable_types.BlockHandle)
+    var footerFilterHandle = option.None[sstable_types.BlockHandle]()
     if builder.filterEnabled:
         var i: int32 = 0
         while i < builder.sections.len:

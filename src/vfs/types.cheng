@@ -1,10 +1,9 @@
 module pebble_vfs_types
 
-import std/std/times as times
+import std/times as times
 
 type
-    VfsError =
-        of CatchableError
+    VfsError = CatchableError
 
 type
     DiskWriteCategory = str
@@ -92,7 +91,7 @@ type
         unwrapFn: fn(self: FileSystem): FileSystem
 
 fn abstractMethod(name: str) =
-    raise newException(VfsError, "abstract method: " & name)
+    raise VfsError(msg: "abstract method: " & name)
 
 fn Close(file: File) =
     if file == nil || file.closeFn == nil:

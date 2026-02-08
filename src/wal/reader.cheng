@@ -1,13 +1,16 @@
 module pebble_wal_reader
 
+import cheng/pebble/core/text as text
 import cheng/pebble/wal/checksum as checksum
 import cheng/pebble/wal/types as wal_types
 import std/os as os
 import std/option as option
+import std/seqs as seqs
+import std/system as sys
 import std/strings as strings
 
 @importc("cheng_fread")
-fn c_fread(ptr: void*, size: int32, n: int32, stream: os.File): int32
+fn walr_c_fread(ptr: void*, size: int32, n: int32, stream: os.File): int32
 
 
 type
@@ -29,7 +32,7 @@ fn readFully(file: os.File, buffer: var seq[uint8]): int32 =
     var total: int32 = 0
     while total < buffer.len:
         let ptr = ptr_add(buffer.buffer, total)
-        let readNow = c_fread(ptr, 1, buffer.len - total, file)
+        let readNow = walr_c_fread(ptr, 1, buffer.len - total, file)
         if readNow <= 0:
             break
         total = total + readNow
@@ -79,7 +82,7 @@ fn nextChunk(reader: WalReader, chunk: var WalChunk): bool =
             if reader.tailTolerance:
                 reader.eof = true
                 return false
-            raise newException(wal_types.WalError, "WAL truncated header at offset " & toString(reader.offset))
+            raise wal_types.WalError(msg: "WAL truncated header at offset " & text.toText(reader.offset))
         reader.blockOffset = reader.blockOffset + wal_types.legacyHeaderSize
         reader.offset = reader.offset + int64(wal_types.legacyHeaderSize)
         let chunkTypeVal = header[6]
@@ -89,7 +92,7 @@ fn nextChunk(reader: WalReader, chunk: var WalChunk): bool =
             if reader.tailTolerance:
                 skipBytes(reader, wal_types.blockSize - reader.blockOffset)
                 continue
-            raise newException(wal_types.WalError, "unknown WAL chunk type")
+            raise wal_types.WalError(msg: "unknown WAL chunk type")
         var fullHeader = header
         if formatInfo.headerSize > wal_types.legacyHeaderSize:
             let extraSize = formatInfo.headerSize - wal_types.legacyHeaderSize
@@ -101,15 +104,17 @@ fn nextChunk(reader: WalReader, chunk: var WalChunk): bool =
                 if reader.tailTolerance:
                     reader.eof = true
                     return false
-                raise newException(wal_types.WalError, "WAL truncated extended header")
-            for b in extra:
-                fullHeader.add(b)
+                raise wal_types.WalError(msg: "WAL truncated extended header")
+            var iExtra: int32 = 0
+            while iExtra < extra.len:
+                fullHeader.add(extra[iExtra])
+                iExtra = iExtra + 1
         let payloadLen = int32(fullHeader[4]) | (int32(fullHeader[5]) << 8)
         if payloadLen < 0 || payloadLen > wal_types.blockSize - formatInfo.headerSize:
             if reader.tailTolerance:
                 reader.eof = true
                 return false
-            raise newException(wal_types.WalError, "invalid chunk length")
+            raise wal_types.WalError(msg: "invalid chunk length")
         var payload = newSeq[uint8](payloadLen)
         if payloadLen > 0:
             let readPayload = readFully(reader.file, payload)
@@ -119,7 +124,7 @@ fn nextChunk(reader: WalReader, chunk: var WalChunk): bool =
                 if reader.tailTolerance:
                     reader.eof = true
                     return false
-                raise newException(wal_types.WalError, "WAL truncated payload")
+                raise wal_types.WalError(msg: "WAL truncated payload")
         var metadata = wal_types.WalRecordMetadata(logNumber: 0, syncOffset: 0)
         var idx: int32 = 7
         if wal_types.IsReusable(formatInfo.format):
@@ -138,7 +143,7 @@ fn nextChunk(reader: WalReader, chunk: var WalChunk): bool =
             crc = checksum.Extend(crc, payload)
         let masked = checksum.MaskChecksum(crc)
         if masked != storedChecksum:
-            raise newException(wal_types.WalError, "checksum mismatch")
+            raise wal_types.WalError(msg: "checksum mismatch")
         chunk.chunkType = chunkType
         chunk.data = payload
         chunk.metadata = metadata
@@ -149,8 +154,9 @@ fn nextChunk(reader: WalReader, chunk: var WalChunk): bool =
 fn NewWalReader(path: str, tailTolerance: bool = true): WalReader =
     let f = os.open(path, os.fmRead)
     if f == nil:
-        raise newException(wal_types.WalError, "unable to open WAL for reading: " & path)
-    var reader: WalReader = new[WalReader]()
+        raise wal_types.WalError(msg: "unable to open WAL for reading: " & path)
+    var reader: WalReader
+    new reader
     if reader != nil:
         reader.path = path
         reader.file = f
@@ -166,9 +172,15 @@ fn Close(reader: WalReader) =
     os.close(reader.file)
     reader.file = nil
 
+fn someReadResult(value: wal_types.WalReadResult): option.Option[wal_types.WalReadResult] =
+    var out: option.Option[wal_types.WalReadResult]
+    out.has = true
+    out.value = value
+    return out
+
 fn ReadNext(reader: WalReader): option.Option[wal_types.WalReadResult] =
     if reader == nil || reader.eof:
-        return option.none(wal_types.WalReadResult)
+        return option.None[wal_types.WalReadResult]()
     var aggregate = newSeq[uint8]()
     var recordMeta = wal_types.WalRecordMetadata(logNumber: 0, syncOffset: 0)
     var started = false
@@ -176,17 +188,17 @@ fn ReadNext(reader: WalReader): option.Option[wal_types.WalReadResult] =
         var chunk: WalChunk
         if ! nextChunk(reader, chunk):
             if started:
-                return option.none(wal_types.WalReadResult)
-            return option.none(wal_types.WalReadResult)
+                return option.None[wal_types.WalReadResult]()
+            return option.None[wal_types.WalReadResult]()
         let pos = wal_types.ChunkPositionOf(chunk.chunkType)
         if pos == wal_types.ChunkPosFull:
             if started && reader.tailTolerance:
-                aggregate.setLen(0)
+                aggregate = newSeq[uint8]()
                 started = false
-            return option.some(wal_types.WalReadResult(payload: chunk.data, metadata: chunk.metadata))
+            return someReadResult(wal_types.WalReadResult(payload: chunk.data, metadata: chunk.metadata))
         if pos == wal_types.ChunkPosFirst:
             if started && reader.tailTolerance:
-                aggregate.setLen(0)
+                aggregate = newSeq[uint8]()
             aggregate = chunk.data
             recordMeta = chunk.metadata
             started = true
@@ -194,24 +206,28 @@ fn ReadNext(reader: WalReader): option.Option[wal_types.WalReadResult] =
             if ! started:
                 if reader.tailTolerance:
                     continue
-                raise newException(wal_types.WalError, "middle chunk without record start")
-            for b in chunk.data:
-                aggregate.add(b)
+                raise wal_types.WalError(msg: "middle chunk without record start")
+            var iMid: int32 = 0
+            while iMid < chunk.data.len:
+                aggregate.add(chunk.data[iMid])
+                iMid = iMid + 1
         elif pos == wal_types.ChunkPosLast:
             if ! started:
                 if reader.tailTolerance:
                     continue
-                raise newException(wal_types.WalError, "last chunk without record start")
-            for b in chunk.data:
-                aggregate.add(b)
+                raise wal_types.WalError(msg: "last chunk without record start")
+            var iLast: int32 = 0
+            while iLast < chunk.data.len:
+                aggregate.add(chunk.data[iLast])
+                iLast = iLast + 1
             let payloadCopy = aggregate
-            aggregate = @[]
+            aggregate = newSeq[uint8]()
             started = false
-            return option.some(wal_types.WalReadResult(payload: payloadCopy, metadata: recordMeta))
+            return someReadResult(wal_types.WalReadResult(payload: payloadCopy, metadata: recordMeta))
         else:
             if reader.tailTolerance:
                 continue
-            raise newException(wal_types.WalError, "invalid chunk position encountered")
+            raise wal_types.WalError(msg: "invalid chunk position encountered")
 
 fn ReadAll(reader: WalReader): seq[wal_types.WalReadResult] =
     var results = newSeq[wal_types.WalReadResult]()

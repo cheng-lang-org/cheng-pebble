@@ -1,12 +1,13 @@
 module pebble_sstable_types
 
+import cheng/pebble/core/text as text
 import cheng/pebble/core/types as core_types
 import std/option as option
+import std/system as sys
 import std/strings as strings
 
 type
-    SSTError =
-        of CatchableError
+    SSTError = CatchableError
 
 type
     BlockHandle =
@@ -73,7 +74,7 @@ fn InitBlockHandle(offset: int32, length: int32): BlockHandle =
     return BlockHandle(offset: offset, length: length)
 
 fn Describe(handle: BlockHandle): str =
-    return "offset=" & toString(handle.offset) & ",length=" & toString(handle.length)
+    return "offset=" & text.toText(handle.offset) & ",length=" & text.toText(handle.length)
 
 fn MergeProperties(into: var TableProperties, other: TableProperties) =
     into.numEntries = into.numEntries + other.numEntries

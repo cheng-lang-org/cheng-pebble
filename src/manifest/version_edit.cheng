@@ -21,13 +21,13 @@ type
 
 fn InitVersionEdit(): VersionEdit =
     return VersionEdit(
-        logNumber: option.none(uint64),
-        prevLogNumber: option.none(uint64),
-        nextFileNumber: option.none(uint64),
-        lastSeqNum: option.none(core_types.SequenceNumber),
-        comparatorName: option.none(str),
-        deletedFiles: @[],
-        addedFiles: @[]
+        logNumber: option.None[uint64](),
+        prevLogNumber: option.None[uint64](),
+        nextFileNumber: option.None[uint64](),
+        lastSeqNum: option.None[core_types.SequenceNumber](),
+        comparatorName: option.None[str](),
+        deletedFiles: newSeq[man_types.FileReference](),
+        addedFiles: newSeq[AddedFile]()
     )
 
 fn IsEmpty(edit: VersionEdit): bool =

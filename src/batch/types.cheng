@@ -5,8 +5,7 @@ import cheng/pebble/mem/types as mem_types
 import cheng/pebble/wal/writer as wal_writer
 
 type
-    BatchError =
-        of CatchableError
+    BatchError = CatchableError
 
 type
     BatchOpKind = mem_types.MemValueKind

@@ -27,34 +27,39 @@ fn initCrcTable() =
 fn Extend(crc: uint32, data: openArray[uint8]): uint32 =
     initCrcTable()
     var c = crc ^ uint32(0xFFFFFFFF)
-    for b in data:
+    var i: int32 = 0
+    while i < len(data):
+        let b = data[i]
         let idx = (c ^ uint32(b)) & uint32(0xFF)
         let tableIdx = int32(idx)
         c = crc32cTable[tableIdx] ^ (c >> 8)
+        i = i + 1
     return c ^ uint32(0xFFFFFFFF)
 
 fn FromByte(value: uint8): array[1, uint8] =
-    return [value]
+    var out: array[1, uint8]
+    out[0] = value
+    return out
 
 fn FromUInt32(value: uint32): array[4, uint8] =
-    return [
-        uint8(value & uint32(0xFF)),
-        uint8((value >> 8) & uint32(0xFF)),
-        uint8((value >> 16) & uint32(0xFF)),
-        uint8((value >> 24) & uint32(0xFF))
-    ]
+    var out: array[4, uint8]
+    out[0] = uint8(value & uint32(0xFF))
+    out[1] = uint8((value >> 8) & uint32(0xFF))
+    out[2] = uint8((value >> 16) & uint32(0xFF))
+    out[3] = uint8((value >> 24) & uint32(0xFF))
+    return out
 
 fn FromUInt64(value: uint64): array[8, uint8] =
-    return [
-        uint8(value & uint64(0xFF)),
-        uint8((value >> 8) & uint64(0xFF)),
-        uint8((value >> 16) & uint64(0xFF)),
-        uint8((value >> 24) & uint64(0xFF)),
-        uint8((value >> 32) & uint64(0xFF)),
-        uint8((value >> 40) & uint64(0xFF)),
-        uint8((value >> 48) & uint64(0xFF)),
-        uint8((value >> 56) & uint64(0xFF))
-    ]
+    var out: array[8, uint8]
+    out[0] = uint8(value & uint64(0xFF))
+    out[1] = uint8((value >> 8) & uint64(0xFF))
+    out[2] = uint8((value >> 16) & uint64(0xFF))
+    out[3] = uint8((value >> 24) & uint64(0xFF))
+    out[4] = uint8((value >> 32) & uint64(0xFF))
+    out[5] = uint8((value >> 40) & uint64(0xFF))
+    out[6] = uint8((value >> 48) & uint64(0xFF))
+    out[7] = uint8((value >> 56) & uint64(0xFF))
+    return out
 
 fn MaskChecksum(crc: uint32): uint32 =
     return ((crc >> 15) | (crc << 17)) + uint32(0xA282EAD8)

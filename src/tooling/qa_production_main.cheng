@@ -1,0 +1,19 @@
+module pebble_tooling_qa_production_main
+
+import cheng/pebble/qa/production_closure as qa_prod
+import std/os as os
+import std/strings as strings
+
+fn runProductionClosure(rootDir: str): int32 =
+    let findings = qa_prod.RunProductionClosureScenario(rootDir)
+    if findings.len == 0:
+        echo("production-closure: OK")
+        return 0
+    echo("production-closure: FAILED")
+    return 1
+
+fn main(): int32 =
+    var rootDir = os.getEnv("PEBBLE_QA_DIR")
+    if strings.len(rootDir) == 0:
+        rootDir = "./pebble_qa_prod"
+    return runProductionClosure(rootDir)

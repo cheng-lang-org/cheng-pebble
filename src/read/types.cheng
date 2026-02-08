@@ -4,8 +4,7 @@ import cheng/pebble/core/types as core_types
 import std/option as option
 
 type
-    ReadError =
-        of CatchableError
+    ReadError = CatchableError
 
 type
     ReadSourceKind = enum
@@ -63,4 +62,4 @@ fn NewReadRange(lower: option.Option[core_types.Key],
     return ReadRange(lower: lower, upper: upper)
 
 fn EmptyRange(): ReadRange =
-    return ReadRange(lower: option.none(core_types.Key), upper: option.none(core_types.Key))
+    return ReadRange(lower: option.None[core_types.Key](), upper: option.None[core_types.Key]())

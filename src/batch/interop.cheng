@@ -23,10 +23,18 @@ type
         value: str
 
 type
-    BatchEntry = tuple(key: str, value: str)
+    BatchEntry = tuple[key: str, value: str]
     BatchState = seq[BatchEntry]
 
 fn findKey(state: BatchState, key: str): int32 =
+    var i: int32 = 0
+    while i < state.len:
+        if state[i][0] == key:
+            return i
+        i = i + 1
+    return -1
+
+fn findKeyMutable(state: var BatchState, key: str): int32 =
     var i: int32 = 0
     while i < state.len:
         if state[i][0] == key:
@@ -38,14 +46,14 @@ fn HasKey(state: BatchState, key: str): bool =
     return findKey(state, key) >= 0
 
 fn SetValue(state: var BatchState, key: str, value: str) =
-    let idx = findKey(state, key)
+    let idx = findKeyMutable(state, key)
     if idx >= 0:
         state[idx] = BatchEntry(key: key, value: value)
     else:
         state.add(BatchEntry(key: key, value: value))
 
 fn DelKey(state: var BatchState, key: str) =
-    let idx = findKey(state, key)
+    let idx = findKeyMutable(state, key)
     if idx >= 0:
         state.delete(idx)
 
@@ -53,7 +61,7 @@ fn GetValue(state: BatchState, key: str): option.Option[str] =
     let idx = findKey(state, key)
     if idx >= 0:
         return option.some(state[idx][1])
-    return option.none(str)
+    return option.None[str]()
 
 fn GetOrDefault(state: BatchState, key: str, fallback: str = ""): str =
     let idx = findKey(state, key)
@@ -147,7 +155,7 @@ fn ApplyOperations(db: batch_db.DB,
                    ops: seq[BatchOperation],
                    state: var BatchState) =
     if db == nil:
-        raise newException(batch_types.BatchError, "db is nil")
+        raise batch_types.BatchError(msg: "db is nil")
     var i: int32 = 0
     while i < ops.len:
         let op = ops[i]
@@ -161,13 +169,13 @@ fn ApplyOperations(db: batch_db.DB,
             batch_impl.Merge(batch, key, op.value)
         batch_db.Commit(db, batch)
         if op.kind == BopDelete:
-            if HasKey(state, op.key):
+            if findKeyMutable(state, op.key) >= 0:
                 DelKey(state, op.key)
         else:
             let current = batch_db.GetLatest(db, key)
             if option.IsSome(current):
                 SetValue(state, op.key, option.Get(current))
-            elif HasKey(state, op.key):
+            elif findKeyMutable(state, op.key) >= 0:
                 DelKey(state, op.key)
         i = i + 1
 

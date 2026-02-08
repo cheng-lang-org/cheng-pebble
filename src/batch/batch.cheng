@@ -1,5 +1,6 @@
 module pebble_batch_batch
 
+import cheng/pebble/core/text as text
 import cheng/pebble/core/types as core_types
 import cheng/pebble/mem/memtable as memtable
 import cheng/pebble/mem/types as mem_types
@@ -35,9 +36,10 @@ type
 
 fn NewBatch(cfg: mem_types.MemTableConfig): BatchBase =
     cfg
-    var batch: BatchBase = new[BatchBase]()
+    var batch: BatchBase
+    new batch
     if batch != nil:
-        batch.ops = @[]
+        batch.ops = newSeq[batch_types.BatchOp]()
         batch.approxBytes = 0
         batch.sealed = false
     return batch
@@ -53,12 +55,14 @@ fn NewIndexedBatch(cfg: mem_types.MemTableConfig,
                    resolver: BatchResolver,
                    snapshot: batch_types.Snapshot): IndexedBatch =
     let indexCfg = cloneForIndex(cfg)
-    var base: BatchBase = new[BatchBase]()
+    var base: BatchBase
+    new base
     if base != nil:
-        base.ops = @[]
+        base.ops = newSeq[batch_types.BatchOp]()
         base.approxBytes = 0
         base.sealed = false
-    var idx: IndexedBatch = new[IndexedBatch]()
+    var idx: IndexedBatch
+    new idx
     if idx != nil:
         idx.base = base
         idx.resolver = resolver
@@ -112,10 +116,9 @@ fn ResetIndexed(batch: IndexedBatch) =
 
 fn ensureMutable(batch: BatchBase) =
     if batch == nil:
-        raise newException(batch_types.BatchError, "batch is nil")
+        raise batch_types.BatchError(msg: "batch is nil")
     if batch.sealed:
-        raise newException(batch_types.BatchError,
-            "batch has been committed/applied; call reset before reusing")
+        raise batch_types.BatchError(msg: "batch has been committed/applied; call reset before reusing")
 
 fn calcEntryBytes(op: batch_types.BatchOp): int32 =
     return core_types.ToBytes(op.key).len + op.value.len + EntryOverhead
@@ -130,7 +133,9 @@ fn appendIndex(batch: IndexedBatch, op: batch_types.BatchOp) =
         kind: op.kind,
         value: op.value
     )
-    memtable.ApplyBatch(batch.index, [entry])
+    var entries = newSeq[mem_types.ApplyEntry](1)
+    entries[0] = entry
+    memtable.ApplyBatch(batch.index, entries)
 
 fn appendOp(batch: BatchBase, op: batch_types.BatchOp, idx: IndexedBatch) =
     ensureMutable(batch)
@@ -159,13 +164,13 @@ fn writeString(buf: var seq[uint8], text: str) =
     var i: int32 = 0
     let n: int32 = text.len
     while i < n:
-        let ch = strings.charAt(text, i)
-        buf.add(uint8(ord(ch)))
+        let ch = text[i]
+        buf.add(uint8(int32(ch)))
         i = i + 1
 
 fn readUint32(data: seq[uint8], pos: int32*): uint32 =
     if *pos + 4 > data.len:
-        raise newException(batch_types.BatchError, "WAL payload truncated (u32)")
+        raise batch_types.BatchError(msg: "WAL payload truncated (u32)")
     let value = uint32(data[*pos]) |
         (uint32(data[*pos + 1]) << 8) |
         (uint32(data[*pos + 2]) << 16) |
@@ -175,7 +180,7 @@ fn readUint32(data: seq[uint8], pos: int32*): uint32 =
 
 fn readUint64(data: seq[uint8], pos: int32*): uint64 =
     if *pos + 8 > data.len:
-        raise newException(batch_types.BatchError, "WAL payload truncated (u64)")
+        raise batch_types.BatchError(msg: "WAL payload truncated (u64)")
     var value: uint64 = 0
     var i: int32 = 0
     while i < 8:
@@ -187,7 +192,7 @@ fn readUint64(data: seq[uint8], pos: int32*): uint64 =
 fn readString(data: seq[uint8], pos: int32*): str =
     let length = int32(readUint32(data, pos))
     if length < 0 || *pos + length > data.len:
-        raise newException(batch_types.BatchError, "WAL payload truncated (string)")
+        raise batch_types.BatchError(msg: "WAL payload truncated (string)")
     var out: str = ""
     var i: int32 = 0
     while i < length:
@@ -199,15 +204,17 @@ fn readString(data: seq[uint8], pos: int32*): str =
 fn readKind(raw: uint8): mem_types.MemValueKind =
     let v = int32(raw)
     if v < int32(mem_types.MemValueSet) || v > int32(mem_types.MemValueMerge):
-        raise newException(batch_types.BatchError, "invalid WAL op kind: " & toString(v))
+        raise batch_types.BatchError(msg: "invalid WAL op kind: " & text.toText(v))
     return mem_types.MemValueKind(v)
 
-fn ToWalPayload(batch: BatchBase, entries: openArray[mem_types.ApplyEntry]): seq[uint8] =
-    if entries.len == 0:
-        return @[]
+fn ToWalPayload(batch: BatchBase, entries: seq[mem_types.ApplyEntry]): seq[uint8] =
+    if len(entries) == 0:
+        return newSeq[uint8]()
     var out = newSeq[uint8]()
-    out.writeUint32(uint32(entries.len))
-    for entry in entries:
+    out.writeUint32(uint32(len(entries)))
+    var i: int32 = 0
+    while i < len(entries):
+        let entry = entries[i]
         out.add(uint8(entry.kind))
         out.writeUint64(core_types.ToUint64(entry.seq))
         let keyBytes = core_types.ToBytes(entry.key)
@@ -215,20 +222,21 @@ fn ToWalPayload(batch: BatchBase, entries: openArray[mem_types.ApplyEntry]): seq
         out.writeString(keyBytes)
         out.writeUint32(uint32(entry.value.len))
         out.writeString(entry.value)
+        i = i + 1
     return out
 
 fn FromWalPayload(payload: seq[uint8]): seq[mem_types.ApplyEntry] =
     if payload.len == 0:
-        return @[]
+        return newSeq[mem_types.ApplyEntry]()
     var pos: int32 = 0
     let count = int32(readUint32(payload, &pos))
     if count < 0:
-        raise newException(batch_types.BatchError, "negative WAL entry count")
+        raise batch_types.BatchError(msg: "negative WAL entry count")
     var entries = newSeq[mem_types.ApplyEntry](count)
     var i: int32 = 0
     while i < count:
         if pos >= payload.len:
-            raise newException(batch_types.BatchError, "WAL payload truncated (entry kind)")
+            raise batch_types.BatchError(msg: "WAL payload truncated (entry kind)")
         let kind = readKind(payload[pos])
         pos = pos + 1
         let seq = core_types.ToSequence(readUint64(payload, &pos))
@@ -242,7 +250,7 @@ fn FromWalPayload(payload: seq[uint8]): seq[mem_types.ApplyEntry] =
         )
         i = i + 1
     if pos != payload.len:
-        raise newException(batch_types.BatchError, "WAL payload has trailing bytes")
+        raise batch_types.BatchError(msg: "WAL payload has trailing bytes")
     return entries
 
 fn Put(batch: BatchBase, key: core_types.Key, value: str, idx: IndexedBatch = nil) =
@@ -275,12 +283,16 @@ fn MergeIndexed(batch: IndexedBatch, key: core_types.Key, operand: str) =
 fn Apply(dest: BatchBase, src: BatchBase, idx: IndexedBatch = nil) =
     if src == nil:
         return
-    for op in src.ops:
+    let ops = src.ops
+    var i: int32 = 0
+    while i < ops.len:
+        let op = ops[i]
         appendOp(dest, op, idx)
+        i = i + 1
 
 fn ToApplyEntries(batch: BatchBase, startSeq: core_types.SequenceNumber): seq[mem_types.ApplyEntry] =
     if batch == nil || batch.ops.len == 0:
-        return @[]
+        return newSeq[mem_types.ApplyEntry]()
     let count = batch.ops.len
     var entries = newSeq[mem_types.ApplyEntry](count)
     var seqVal = core_types.ToUint64(startSeq)
@@ -307,15 +319,15 @@ fn Snapshot(batch: IndexedBatch): batch_types.Snapshot =
 
 fn Get(batch: IndexedBatch, key: core_types.Key, snapshot: batch_types.Snapshot): option.Option[str] =
     if batch == nil || batch.index == nil:
-        return option.none(str)
+        return option.None[str]()
     let local = memtable.Get(batch.index, key, core_types.ToSequence(core_types.ToUint64(snapshot.seq)))
     if option.IsSome(local):
         return local
     if batch.resolver != nil:
         return batch.resolver(key, snapshot)
-    return option.none(str)
+    return option.None[str]()
 
 fn GetLatest(batch: IndexedBatch, key: core_types.Key): option.Option[str] =
     if batch == nil:
-        return option.none(str)
+        return option.None[str]()
     return Get(batch, key, batch.snapshot)

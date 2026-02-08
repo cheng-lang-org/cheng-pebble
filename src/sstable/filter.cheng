@@ -36,8 +36,8 @@ fn hashMix(key: str, salt: uint32): uint32 =
     var i: int32 = 0
     let n: int32 = strings.len(key)
     while i < n:
-        let ch = strings.charAt(key, i)
-        h = (h ^ uint32(sys.ord(ch))) * uint32(16777619)
+        let ch = key[i]
+        h = (h ^ uint32(int32(ch))) * uint32(16777619)
         i = i + 1
     h = h ^ salt
     h = h * uint32(16777619)
@@ -45,23 +45,25 @@ fn hashMix(key: str, salt: uint32): uint32 =
 
 fn InitBloomFilterBuilder(bitsPerKey: int32): BloomFilterBuilder =
     if bitsPerKey <= 0:
-        raise newException(sstable_types.SSTError, "bitsPerKey must be positive")
-    return BloomFilterBuilder(bitsPerKey: bitsPerKey, keys: @[])
+        raise sstable_types.SSTError(msg: "bitsPerKey must be positive")
+    return BloomFilterBuilder(bitsPerKey: bitsPerKey, keys: newSeq[str]())
 
 fn AddKey(builder: var BloomFilterBuilder, key: core_types.Key) =
-    builder.keys.add(core_types.ToBytes(key))
+    var keys = builder.keys
+    add(keys, core_types.ToBytes(key))
+    builder.keys = keys
 
 fn buildFilter(keys: seq[str], bitsPerKey: int32): sstable_types.BloomFilter =
     let numProbes = OptimalProbes(bitsPerKey)
     if keys.len == 0:
-        return sstable_types.BloomFilter(bits: @[], numBits: 0, numProbes: numProbes)
+        return sstable_types.BloomFilter(bits: newSeq[uint8](), numBits: 0, numProbes: numProbes)
     var numBits: int32 = keys.len * bitsPerKey
     if numBits < MinBloomBits:
         numBits = MinBloomBits
     let numBytes = (numBits + 7) >> 3
     var bits = newSeq[uint8](numBytes)
-    const salt1 = uint32(0x47c6a7e5)
-    const salt2 = uint32(0x9e3779b1)
+    let salt1 = uint32(0x47c6a7e5)
+    let salt2 = uint32(0x9e3779b1)
     var i: int32 = 0
     while i < keys.len:
         let key = keys[i]
@@ -84,24 +86,24 @@ fn EncodeBloomFilter(filter: sstable_types.BloomFilter): seq[uint8] =
     enc.AppendVarint(out, uint64(filter.numProbes))
     var i: int32 = 0
     while i < filter.bits.len:
-        out.add(filter.bits[i])
+        add(out, filter.bits[i])
         i = i + 1
     return out
 
 fn Finish(builder: var BloomFilterBuilder): BloomBuildResult =
     let filter = buildFilter(builder.keys, builder.bitsPerKey)
     let data = EncodeBloomFilter(filter)
-    builder.keys.setLen(0)
+    builder.keys = newSeq[str]()
     return BloomBuildResult(data: data, filter: filter)
 
 fn DecodeBloomFilter(data: seq[uint8]): sstable_types.BloomFilter =
     if data.len == 0:
-        return sstable_types.BloomFilter(bits: @[], numBits: 0, numProbes: 0)
+        return sstable_types.BloomFilter(bits: newSeq[uint8](), numBits: 0, numProbes: 0)
     var pos: int32 = 0
     let numBits = int32(enc.DecodeVarint(data, &pos))
     let numProbes = int32(enc.DecodeVarint(data, &pos))
     if pos > data.len:
-        raise newException(sstable_types.SSTError, "invalid bloom filter encoding")
+        raise sstable_types.SSTError(msg: "invalid bloom filter encoding")
     let remaining = data.len - pos
     var bits = newSeq[uint8](remaining)
     var idx: int32 = 0
@@ -113,8 +115,8 @@ fn DecodeBloomFilter(data: seq[uint8]): sstable_types.BloomFilter =
 fn MaybeContains(filter: sstable_types.BloomFilter, key: core_types.Key): bool =
     if filter.numBits == 0 || filter.bits.len == 0:
         return true
-    const salt1 = uint32(0x47c6a7e5)
-    const salt2 = uint32(0x9e3779b1)
+    let salt1 = uint32(0x47c6a7e5)
+    let salt2 = uint32(0x9e3779b1)
     let keyBytes = core_types.ToBytes(key)
     let h1 = hashMix(keyBytes, salt1)
     let h2 = hashMix(keyBytes, salt2)

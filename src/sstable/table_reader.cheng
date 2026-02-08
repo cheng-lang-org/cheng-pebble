@@ -1,17 +1,16 @@
 module pebble_sstable_table_reader
 
+import cheng/pebble/core/text as text
 import cheng/pebble/core/types as core_types
 import cheng/pebble/sstable/types as sstable_types
 import cheng/pebble/sstable/encoding as enc
-import cheng/pebble/sstable/block as block
+import cheng/pebble/sstable/block as block_mod
 import cheng/pebble/sstable/filter as filter
 import cheng/pebble/sstable/cache as cache
 import std/option as option
+import std/system as sys
 import std/strings as strings
-import std/std/strutils as strutils
-
-const
-    FooterMagic = "SSTN"
+import std/strutils as strutils
 
 type
     TableReader = ref
@@ -24,29 +23,29 @@ type
         cache: cache.BlockCache
         cacheNamespace: str
 
-    ScanItem = tuple(key: core_types.Key, value: str)
+    ScanItem = tuple[key: core_types.Key, value: str]
 
 var readerIdCounter: int32 = 0
 
 fn nextReaderNamespace(): str =
     readerIdCounter = readerIdCounter + 1
-    return "sst-reader-" & toString(readerIdCounter)
+    return "sst-reader-" & text.toText(readerIdCounter)
 
 fn cacheKey(reader: TableReader, handle: sstable_types.BlockHandle): str =
-    return reader.cacheNamespace & ":" & toString(handle.offset) & ":" & toString(handle.length)
+    return reader.cacheNamespace & ":" & text.toText(handle.offset) & ":" & text.toText(handle.length)
 
 fn validateHandle(totalLen: int32, handle: sstable_types.BlockHandle, label: str) =
     if handle.offset < 0 || handle.length < 0:
-        raise newException(sstable_types.SSTError, label & " handle has negative values")
+        raise sstable_types.SSTError(msg: label & " handle has negative values")
     if handle.offset > totalLen || handle.length > totalLen:
-        raise newException(sstable_types.SSTError, label & " handle exceeds table bounds")
+        raise sstable_types.SSTError(msg: label & " handle exceeds table bounds")
     let endPos = handle.offset + handle.length
     if endPos > totalLen:
-        raise newException(sstable_types.SSTError, label & " handle length out of bounds")
+        raise sstable_types.SSTError(msg: label & " handle length out of bounds")
 
 fn sliceBytes(data: seq[uint8], start: int32, length: int32): seq[uint8] =
     if length <= 0:
-        return @[]
+        return newSeq[uint8]()
     var out = newSeq[uint8](length)
     var i: int32 = 0
     while i < length:
@@ -57,34 +56,35 @@ fn sliceBytes(data: seq[uint8], start: int32, length: int32): seq[uint8] =
 fn sliceForHandle(data: seq[uint8], handle: sstable_types.BlockHandle, label: str): seq[uint8] =
     validateHandle(data.len, handle, label)
     if handle.length == 0:
-        return @[]
+        return newSeq[uint8]()
     return sliceBytes(data, handle.offset, handle.length)
 
 fn loadBlock(reader: TableReader, handle: sstable_types.BlockHandle, label: str): seq[uint8] =
     if reader.cache != nil:
         let key = cacheKey(reader, handle)
         let cached = cache.Get(reader.cache, key)
-        if option.IsSome(cached):
-            return option.Get(cached)
+        if cached.has:
+            return cached.value
         let slice = sliceForHandle(reader.image.buffer, handle, label)
         cache.Put(reader.cache, key, slice)
         return slice
     return sliceForHandle(reader.image.buffer, handle, label)
 
 fn decodeFooter(data: seq[uint8]): sstable_types.TableFooter =
-    let magicLen: int32 = strings.len(FooterMagic)
+    let magic = "SSTN"
+    let magicLen: int32 = strings.len(magic)
     if data.len < magicLen + 4:
-        raise newException(sstable_types.SSTError, "sstable too small for footer")
+        raise sstable_types.SSTError(msg: "sstable too small for footer")
     let magicOffset = data.len - magicLen
     var i: int32 = 0
     while i < magicLen:
-        let expect = uint8(strings.charAt(FooterMagic, i))
+        let expect = uint8(magic[i])
         if data[magicOffset + i] != expect:
-            raise newException(sstable_types.SSTError, "footer magic mismatch")
+            raise sstable_types.SSTError(msg: "footer magic mismatch")
         i = i + 1
     let lengthOffset = magicOffset - 4
     if lengthOffset < 0:
-        raise newException(sstable_types.SSTError, "footer corrupted")
+        raise sstable_types.SSTError(msg: "footer corrupted")
     var payloadLen: int32 = 0
     var shift: int32 = 0
     while shift < 4:
@@ -92,14 +92,14 @@ fn decodeFooter(data: seq[uint8]): sstable_types.TableFooter =
         shift = shift + 1
     let payloadStart = lengthOffset - payloadLen
     if payloadStart < 0:
-        raise newException(sstable_types.SSTError, "footer length out of bounds")
+        raise sstable_types.SSTError(msg: "footer length out of bounds")
     if payloadStart + payloadLen != lengthOffset:
-        raise newException(sstable_types.SSTError, "footer payload length mismatch")
+        raise sstable_types.SSTError(msg: "footer payload length mismatch")
     var pos: int32 = payloadStart
     let indexOffset = int32(enc.DecodeVarint(data, &pos))
     let indexLength = int32(enc.DecodeVarint(data, &pos))
     let hasFilter = enc.DecodeVarint(data, &pos)
-    var filterHandle = option.none(sstable_types.BlockHandle)
+    var filterHandle = option.None[sstable_types.BlockHandle]()
     if hasFilter == uint64(1):
         let filterOffset = int32(enc.DecodeVarint(data, &pos))
         let filterLength = int32(enc.DecodeVarint(data, &pos))
@@ -165,9 +165,9 @@ fn NewTableReader(data: seq[uint8], comparator: core_types.Comparator = core_typ
         sections.add(sstable_types.TableSection(kind: sstable_types.BlockData, handle: entry.handle))
         i = i + 1
     sections.add(sstable_types.TableSection(kind: sstable_types.BlockIndex, handle: footer.indexHandle))
-    var bloom = option.none(sstable_types.BloomFilter)
-    if option.IsSome(footer.filterHandle):
-        let handle = option.Get(footer.filterHandle)
+    var bloom = option.None[sstable_types.BloomFilter]()
+    if footer.filterHandle.has:
+        let handle = footer.filterHandle.value
         let filterSlice = sliceForHandle(data, handle, "filter")
         bloom = option.some(filter.DecodeBloomFilter(filterSlice))
         sections.add(sstable_types.TableSection(kind: sstable_types.BlockFilter, handle: handle))
@@ -175,7 +175,8 @@ fn NewTableReader(data: seq[uint8], comparator: core_types.Comparator = core_typ
     let metaSlice = sliceForHandle(data, footer.metaHandle, "meta")
     sections.add(sstable_types.TableSection(kind: sstable_types.BlockMeta, handle: footer.metaHandle))
     let props = decodeProperties(metaSlice)
-    var reader: TableReader = new[TableReader]()
+    var reader: TableReader
+    new reader
     if reader != nil:
         reader.comparator = comparator
         reader.image = sstable_types.SSTableImage(buffer: data, sections: sections)
@@ -199,10 +200,10 @@ fn MaybeContains(reader: TableReader, key: core_types.Key): bool =
 
 fn locateBlock(reader: TableReader, key: core_types.Key): option.Option[sstable_types.BlockHandle] =
     if reader.indexEntries.len == 0:
-        return option.none(sstable_types.BlockHandle)
+        return option.None[sstable_types.BlockHandle]()
     var lo: int32 = 0
     var hi: int32 = reader.indexEntries.len - 1
-    var candidate = option.none(sstable_types.BlockHandle)
+    var candidate = option.None[sstable_types.BlockHandle]()
     while lo <= hi:
         let mid = (lo + hi) >> 1
         let entry = reader.indexEntries[mid]
@@ -218,17 +219,17 @@ fn locateBlock(reader: TableReader, key: core_types.Key): option.Option[sstable_
 
 fn Get(reader: TableReader, key: core_types.Key): option.Option[str] =
     if reader == nil:
-        return option.none(str)
+        return option.None[str]()
     if ! MaybeContains(reader, key):
-        return option.none(str)
+        return option.None[str]()
     let blockHandleOpt = locateBlock(reader, key)
     if ! option.IsSome(blockHandleOpt):
-        return option.none(str)
+        return option.None[str]()
     let handle = option.Get(blockHandleOpt)
     let slice = loadBlock(reader, handle, "data")
-    var blockIter = block.InitBlockIterator(slice)
+    var blockIter = block_mod.InitBlockIterator(slice)
     while true:
-        let nextEntry = block.Next(blockIter)
+        let nextEntry = block_mod.Next(blockIter)
         if ! option.IsSome(nextEntry):
             break
         let entry = option.Get(nextEntry)
@@ -237,21 +238,26 @@ fn Get(reader: TableReader, key: core_types.Key): option.Option[str] =
             return option.some(entry.value)
         if cmp > 0:
             break
-    return option.none(str)
+    return option.None[str]()
 
-iterator Scan(reader: TableReader): ScanItem =
+fn Scan(reader: TableReader): seq[ScanItem] =
+    var out: seq[ScanItem]
     if reader == nil:
-        return
-    for entry in reader.indexEntries:
-        let handle = entry.handle
-        let slice = loadBlock(reader, handle, "data")
-        var blockIter = block.InitBlockIterator(slice)
+        return out
+    var i: int32 = 0
+    while i < reader.indexEntries.len:
+        let entry: sstable_types.IndexEntry = reader.indexEntries[i]
+        let handle: sstable_types.BlockHandle = entry.handle
+        let slice: seq[uint8] = loadBlock(reader, handle, "data")
+        var blockIter: block_mod.BlockIterator = block_mod.InitBlockIterator(slice)
         while true:
-            let item = block.Next(blockIter)
-            if ! option.IsSome(item):
+            let itemOpt: option.Option[block_mod.BlockItem] = block_mod.Next(blockIter)
+            if ! option.IsSome(itemOpt):
                 break
-            let kv = option.Get(item)
-            yield ScanItem(key: kv.key, value: kv.value)
+            let kv: block_mod.BlockItem = option.Get(itemOpt)
+            out.add(ScanItem(key: kv.key, value: kv.value))
+        i = i + 1
+    return out
 
 fn TableSize(reader: TableReader): int32 =
     if reader == nil:

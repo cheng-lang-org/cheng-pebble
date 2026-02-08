@@ -89,13 +89,13 @@ fn NewBlockCache(capacityBytes: int32): BlockCache =
 
 fn Get(cache: BlockCache, key: str): option.Option[seq[uint8]] =
     if ! enabled(cache) || key == nil || strings.len(key) == 0:
-        return option.none(seq[uint8])
+        return option.None[seq[uint8]]()
     let idx = findEntryIndex(cache, key)
     if idx < 0:
-        return option.none(seq[uint8])
+        return option.None[seq[uint8]]()
     let entry = cache.entries[idx]
     if entry == nil:
-        return option.none(seq[uint8])
+        return option.None[seq[uint8]]()
     touchOrder(cache, key)
     return option.some(entry.payload)
 

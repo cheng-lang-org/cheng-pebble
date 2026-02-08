@@ -1,9 +1,9 @@
 module pebble_vfs_compat_report
 
 import std/os as os
-import std/std/strutils as strutils
+import std/strutils as strutils
 import std/strings as strings
-import std/std/times as times
+import std/times as times
 
 
 type

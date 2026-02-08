@@ -3,12 +3,11 @@ module pebble_compaction_types
 import cheng/pebble/core/types as core_types
 import cheng/pebble/manifest/types as man_types
 import std/option as option
-import std/std/times as times
+import std/times as times
 
 
 type
-    CompactionError =
-        of CatchableError
+    CompactionError = CatchableError
 
 type
     CompactionPriority = enum
@@ -142,5 +141,5 @@ fn NowTimestampMs(): int64 =
 
 fn DefaultTelemetry(): CompactionTelemetry =
     return CompactionTelemetry(levelScores: @[],
-        selectedStrategy: option.none(str),
-        reason: option.none(str))
+        selectedStrategy: option.None[str](),
+        reason: option.None[str]())

@@ -2,12 +2,11 @@ module pebble_config_loader
 
 import std/strings as strings
 import std/os as os
-import std/std/strutils as strutils
+import std/strutils as strutils
 import std/tables as tables
 
 type
-    ConfigError =
-        of CatchableError
+    ConfigError = CatchableError
 
 type
     FlatConfig = tables.Table[str]
@@ -27,7 +26,7 @@ fn findSeparator(line: str): int32 =
 
 fn LoadConfigFile(path: str): FlatConfig =
     if ! os.fileExists(path):
-        raise newException(ConfigError, "config file not found: " & path)
+        raise ConfigError(msg: "config file not found: " & path)
     let content = os.readFile(path)
     let lines = strutils.split(content, '\n')
     var cfg = NewFlatConfig()
@@ -92,7 +91,7 @@ fn Get(cfg: FlatConfig, key: str, fallback: str = ""): str =
 fn Require(cfg: FlatConfig, key: str): str =
     if tables.TableHas[str](cfg, key):
         return tables.TableGet[str](cfg, key)
-    raise newException(ConfigError, "missing required config key: " & key)
+    raise ConfigError(msg: "missing required config key: " & key)
 
 fn ToBool(cfg: FlatConfig, key: str, fallback: bool = false): bool =
     if ! tables.TableHas[str](cfg, key):
@@ -119,7 +118,7 @@ fn parseFloat(value: str): float64 =
         if ch < '0' || ch > '9':
             break
         hadDigit = true
-        intPart = intPart * 10 + int64(ord(ch) - ord('0'))
+        intPart = intPart * 10 + int64(int32(ch) - int32('0'))
         i = i + 1
     var frac: float64 = 0.0
     var denom: float64 = 1.0
@@ -130,7 +129,7 @@ fn parseFloat(value: str): float64 =
             if ch < '0' || ch > '9':
                 break
             denom = denom * 10.0
-            frac = frac + float64(ord(ch) - ord('0')) / denom
+            frac = frac + float64(int32(ch) - int32('0')) / denom
             i = i + 1
     if ! hadDigit && frac == 0.0:
         return 0.0
